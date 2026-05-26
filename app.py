@@ -546,12 +546,13 @@ def compute_gann_confluence(data):
 
 def compute_sbc(symbol, data):
     """
-    Evolved SBC - Layers 1 to 5
+    COMPLETE 6-Layer Sarvatobhadra Chakra (SBC)
     Layer 1: Vedha
     Layer 2: Placement Strength
     Layer 3: Chakra House
     Layer 4: Drishti / Aspects
     Layer 5: Special Combinations
+    Layer 6: Stock-Specific Sector Mapping
     """
     import swisseph as swe
     import hashlib
@@ -593,7 +594,7 @@ def compute_sbc(symbol, data):
         "Revati",
     ]
 
-    # Stock Nakshatra
+    # Stock Nakshatra (Layer 1 base)
     sym_hash = int(hashlib.md5(symbol.encode()).hexdigest(), 16)
     stock_nak_idx = sym_hash % 27
     stock_nak = nakshatras[stock_nak_idx]
@@ -679,28 +680,38 @@ def compute_sbc(symbol, data):
         return "No Aspect", 0
 
     # Layer 5: Special Combinations
-    def get_special_combinations(name, lon, speed, all_lons):
+    def get_special(name, lon, speed, all_lons):
         special = []
-        # Retrograde
         if speed < 0:
             special.append("Retrograde")
-        # Combustion (close to Sun)
         if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8:
             special.append("Combust")
-        # Planetary war / same nakshatra
         my_idx = int((lon % 360) / (360 / 27))
-        for other_name, other_lon in all_lons.items():
-            if (
-                other_name != name.lower() and abs(other_lon - lon) < 13.33
-            ):  # same nakshatra
+        for o_name, o_lon in all_lons.items():
+            if o_name != name.lower() and abs(o_lon - lon) < 13.33:
                 special.append("Planetary War")
                 break
-        # Abhijit influence (special 28th nakshatra zone)
         if 276 <= lon % 360 <= 280:
-            special.append("Abhijit Influence")
+            special.append("Abhijit")
         return " + ".join(special) if special else "Normal"
 
-    # Prepare all longitudes for Layer 5
+    # Layer 6: Stock-Specific Sector Mapping
+    sector = data.get("sector", "Unknown").lower()
+    sector_keywords = {
+        "technology": ["Mercury ☿", "Jupiter ♃"],
+        "it": ["Mercury ☿", "Jupiter ♃"],
+        "bank": ["Venus ♀", "Jupiter ♃"],
+        "financial": ["Venus ♀", "Jupiter ♃"],
+        "auto": ["Mars ♂"],
+        "pharmaceutical": ["Moon ☽", "Jupiter ♃"],
+        "energy": ["Sun ☉", "Mars ♂"],
+        "metal": ["Saturn ♄", "Mars ♂"],
+        "telecom": ["Mercury ☿"],
+        "default": ["Jupiter ♃", "Venus ♀"],
+    }
+    key_planets = sector_keywords.get(sector, sector_keywords["default"])
+
+    # Prepare longitudes
     all_lons = {
         "sun": sun_lon,
         "moon": moon_lon,
@@ -713,7 +724,6 @@ def compute_sbc(symbol, data):
         "ketu": ketu_lon,
     }
 
-    # Build planet data (5 layers)
     planet_list = [
         ("Sun ☉", sun_lon, sun_speed),
         ("Moon ☽", moon_lon, moon_speed),
@@ -733,20 +743,24 @@ def compute_sbc(symbol, data):
         p_idx, p_nak = lon_to_nak(lon)
         p_sign = lon_to_sign(lon)
 
-        vedha, vedha_weight = check_vedha(p_idx, stock_nak_idx, name)
-        sbc_raw += vedha_weight
+        vedha, vedha_w = check_vedha(p_idx, stock_nak_idx, name)
+        sbc_raw += vedha_w
 
-        placement = (
-            "Strong" if vedha_weight > 1 else "Weak" if vedha_weight < -1 else "Average"
-        )
+        placement = "Strong" if vedha_w > 1 else "Weak" if vedha_w < -1 else "Average"
         house_type, _ = get_chakra_house(p_idx, stock_nak_idx)
-        drishti, drishti_weight = get_drishti(p_idx, stock_nak_idx, name)
-        sbc_raw += drishti_weight
+        drishti, drishti_w = get_drishti(p_idx, stock_nak_idx, name)
+        sbc_raw += drishti_w
 
-        special = get_special_combinations(name, lon, speed, all_lons)
+        special = get_special(name, lon, speed, all_lons)
 
-        impact = f"{name} in {p_nak} ({p_sign}) — {house_type} • {placement} • {drishti} • {special}"
+        # Layer 6: Sector alignment
+        sector_match = (
+            "Strong Sector Alignment" if name in key_planets else "Neutral Sector"
+        )
 
+        impact = f"{name} in {p_nak} ({p_sign}) — {house_type} • {placement} • {drishti} • {special} • {sector_match}"
+
+        total_weight = vedha_w + drishti_w
         planet_data.append(
             (
                 name,
@@ -757,8 +771,9 @@ def compute_sbc(symbol, data):
                 house_type,
                 drishti,
                 special,
+                sector_match,
                 impact,
-                vedha_weight + drishti_weight,
+                total_weight,
             )
         )
 
@@ -777,11 +792,18 @@ def compute_sbc(symbol, data):
         "#10b981" if sbc_score >= 62 else "#f59e0b" if sbc_score >= 48 else "#ef4444"
     )
 
-    benefic = sum(1 for p in planet_data if p[9] > 0)
-    malefic = sum(1 for p in planet_data if p[9] < 0)
+    benefic = sum(1 for p in planet_data if p[10] > 0)
+    malefic = sum(1 for p in planet_data if p[10] < 0)
 
-    return sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data
-    # =========================================================
+    return (
+        sbc_score,
+        sbc_label,
+        sbc_color,
+        stock_nak,
+        benefic,
+        malefic,
+        planet_data,
+    )  # =========================================================
     # BUILD SBC TABLE
     # =========================================================
 
@@ -1878,7 +1900,7 @@ with tab_analyzer:
                 unsafe_allow_html=True,
             )
             st.caption(
-                f"Layers 1–5 Active • Vedha + Placement + House + Drishti + Special Combinations • {datetime.now().strftime('%d %b %Y')}"
+                f"✅ FULL 6-Layer SBC Analysis • {datetime.now().strftime('%d %b %Y')}"
             )
 
             sb1, sb2, sb3 = st.columns(3)
@@ -1898,7 +1920,7 @@ with tab_analyzer:
                     unsafe_allow_html=True,
                 )
 
-            st.markdown("#### Planetary Impact Analysis (5 Layers)")
+            st.markdown("#### Planetary Impact Analysis — Full 6 Layers")
 
             for i in range(0, len(planet_data), 4):
                 cols = st.columns(4)
@@ -1911,6 +1933,7 @@ with tab_analyzer:
                     house_type,
                     drishti,
                     special,
+                    sector_match,
                     impact,
                     weight,
                 ) in enumerate(planet_data[i : i + 4]):
@@ -1933,7 +1956,8 @@ with tab_analyzer:
                             <div style="color:{color};font-weight:700;margin:8px 0 4px">{vedha}</div>
                             <div style="font-size:12px;color:#64748b;margin-bottom:4px">
                                 {placement} • {house_type} • {drishti}<br>
-                                <span style="color:#f59e0b">{special}</span>
+                                <span style="color:#f59e0b">{special}</span><br>
+                                <span style="color:#8b5cf6">{sector_match}</span>
                             </div>
                             <div style="color:#94a3b8;line-height:1.6;font-size:12.5px">{impact}</div>
                         </div>
