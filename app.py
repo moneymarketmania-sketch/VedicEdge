@@ -1811,90 +1811,52 @@ with tab_analyzer:
         # TAB 3 — SBC (fully dynamic)
         # ====================================================================
         # ====================== SBC DEEP ANALYSIS (Dynamic & Accurate) ======================
+                # ====================== SBC DEEP ANALYSIS (Layer 1 + Layer 2) ======================
         with sbc_tab:
-            # Call the accurate function
-            (
-                sbc_score,
-                sbc_label,
-                sbc_color,
-                stock_nak,
-                benefic,
-                malefic,
-                planet_data,
-            ) = compute_sbc(symbol, data)
+            sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data = compute_sbc(symbol, data)
 
-            st.markdown(
-                f'<div class="sec-title">🔵 Sarvatobhadra Chakra — {symbol} · {stock_nak} Nakshatra</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(
-                f"Dynamic planetary vedha computed for {datetime.now().strftime('%d %b %Y')}"
-            )
+            st.markdown(f'<div class="sec-title">🔵 Sarvatobhadra Chakra — {symbol} · {stock_nak} Nakshatra</div>', unsafe_allow_html=True)
+            st.caption(f"Dynamic planetary vedha + placement strength • {datetime.now().strftime('%d %b %Y')}")
 
             # KPI cards
             sb1, sb2, sb3 = st.columns(3)
             with sb1:
-                st.markdown(
-                    f"""
+                st.markdown(f'''
                 <div class="gc gc-purple" style="text-align:center">
                     <div class="kpi-label">SBC Vedha Score</div>
                     <div class="score-ring" style="color:{sbc_color}">{sbc_score}</div>
                     <div style="color:{sbc_color};font-weight:700">{sbc_label}</div>
                 </div>
-                """,
-                    unsafe_allow_html=True,
-                )
+                ''', unsafe_allow_html=True)
             with sb2:
-                st.markdown(
-                    f"""
+                st.markdown(f'''
                 <div class="gc gc-green" style="text-align:center">
                     <div class="kpi-label">Positive Vedhas</div>
                     <div class="score-ring" style="color:#10b981">{benefic}</div>
                 </div>
-                """,
-                    unsafe_allow_html=True,
-                )
+                ''', unsafe_allow_html=True)
             with sb3:
-                st.markdown(
-                    f"""
+                st.markdown(f'''
                 <div class="gc gc-red" style="text-align:center">
                     <div class="kpi-label">Negative Vedhas</div>
                     <div class="score-ring" style="color:#ef4444">{malefic}</div>
                 </div>
-                """,
-                    unsafe_allow_html=True,
-                )
+                ''', unsafe_allow_html=True)
 
-            st.markdown("#### Planetary Impact Analysis (Dynamic & Stock-Specific)")
+            st.markdown("#### Planetary Impact Analysis (Vedha + Placement Strength)")
 
             for i in range(0, len(planet_data), 4):
                 cols = st.columns(4)
-                for j, (name, sign, nak, vedha, nature, impact, weight) in enumerate(
-                    planet_data[i : i + 4]
-                ):
-                    color = (
-                        "#10b981"
-                        if weight > 0
-                        else "#ef4444" if weight < 0 else "#f59e0b"
-                    )
-                    gc_cls = (
-                        "gc-green"
-                        if weight > 1
-                        else (
-                            "gc-red"
-                            if weight < -1
-                            else "gc-gold" if weight != 0 else "gc-blue"
-                        )
-                    )
+                for j, (name, sign, nak, vedha, placement_strength, impact, weight) in enumerate(planet_data[i:i+4]):
+                    color = "#10b981" if weight > 0 else "#ef4444" if weight < 0 else "#f59e0b"
+                    gc_cls = "gc-green" if weight > 1 else "gc-red" if weight < -1 else "gc-gold" if weight != 0 else "gc-blue"
                     with cols[j]:
-                        st.markdown(
-                            f"""
+                        st.markdown(f"""
                         <div class="gc {gc_cls}">
-                            <div style="font-size:22px;margin-bottom:2px">{name}</div>
+                            <div style="font-size:22px;margin-bottom:4px">{name}</div>
                             <div style="color:#475569;font-size:11px">{sign} · {nak}</div>
-                            <div style="color:{color};font-weight:700;margin:6px 0;font-size:12px">{vedha} · {nature}</div>
-                            <div style="color:#94a3b8;line-height:1.6;font-size:12px">{impact}</div>
+                            <div style="color:{color};font-weight:700;margin:8px 0 4px;font-size:13px">{vedha}</div>
+                            <div style="font-size:12px;color:#64748b;margin-bottom:6px"><b>{placement_strength}</b> placement</div>
+                            <div style="color:#94a3b8;line-height:1.6;font-size:12.5px">{impact}</div>
                         </div>
-                        """,
-                            unsafe_allow_html=True,
-                        )
+                        """, unsafe_allow_html=True)
