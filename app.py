@@ -144,10 +144,14 @@ def fetch_stock_data(symbol):
         prev = float(info.get("previousClose") or hist["Close"].iloc[-2])
         chg = round((price - prev) / prev * 100, 2)
 
-        # Technicals
+        # Technicals — RSI uses Wilder's smoothing (EWM alpha=1/14), not simple rolling mean
         delta = hist["Close"].diff()
-        g = delta.clip(lower=0).rolling(14).mean()
-        l = (-delta.clip(upper=0)).rolling(14).mean()
+        g = delta.clip(lower=0).ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        l = (
+            (-delta.clip(upper=0))
+            .ewm(alpha=1 / 14, min_periods=14, adjust=False)
+            .mean()
+        )
         rsi_raw = 100 - 100 / (1 + g / l)
         rsi = (
             round(float(rsi_raw.iloc[-1]), 1)
@@ -251,12 +255,34 @@ def compute_technicals(data):
             ],
             axis=1,
         ).max(axis=1)
-        atr14 = tr_s.rolling(14).mean()
+        # ADX: use Wilder's smoothing for DM+/DM−/ATR, then smooth DX → true ADX
+        atr14 = tr_s.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
         dmp = h["High"].diff().clip(lower=0)
-        dmn = -h["Low"].diff().clip(upper=0)
-        di_pos = round(float((dmp.rolling(14).mean() / atr14 * 100).iloc[-1]), 1)
-        di_neg = round(float((dmn.rolling(14).mean() / atr14 * 100).iloc[-1]), 1)
-        adx = round(float(abs(di_pos - di_neg) / max(di_pos + di_neg, 0.01) * 100), 1)
+        dmn = (-h["Low"].diff()).clip(lower=0)
+        # Zero out cases where the other direction moved more (standard DM rule)
+        dmp = dmp.where(dmp > dmn, 0)
+        dmn = dmn.where(dmn > dmp, 0)
+        di_pos_s = dmp.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        di_neg_s = dmn.ewm(alpha=1 / 14, min_periods=14, adjust=False).mean()
+        di_pos = round(float((di_pos_s / atr14 * 100).iloc[-1]), 1)
+        di_neg = round(float((di_neg_s / atr14 * 100).iloc[-1]), 1)
+        dx = abs(di_pos - di_neg) / max(di_pos + di_neg, 0.01) * 100
+        # True ADX = 14-period Wilder smooth of DX (computed over rolling series)
+        di_pos_series = di_pos_s / atr14 * 100
+        di_neg_series = di_neg_s / atr14 * 100
+        dx_series = (
+            (di_pos_series - di_neg_series).abs()
+            / (di_pos_series + di_neg_series).clip(lower=0.01)
+            * 100
+        )
+        adx = round(
+            float(
+                dx_series.ewm(alpha=1 / 14, min_periods=14, adjust=False)
+                .mean()
+                .iloc[-1]
+            ),
+            1,
+        )
         ph = round(float(h["High"].iloc[-2]), 2)
         pl = round(float(h["Low"].iloc[-2]), 2)
         pc = round(float(h["Close"].iloc[-2]), 2)
@@ -558,13 +584,43 @@ def compute_sbc(symbol, data):
     COMPLETE 6-Layer Sarvatobhadra Chakra (SBC) - Strict & Transparent
     Layer 5 now uses very strict triggers as per your preference.
     """
-    import swisseph as swe
-    import hashlib
     import os
     from datetime import datetime, timezone
 
-    EPHE_PATH = os.path.join(os.path.dirname(__file__), "ephe")
-    swe.set_ephe_path(EPHE_PATH)
+    try:
+        import swisseph as swe
+    except ImportError:
+        # Return a neutral placeholder if swisseph is not installed
+        return (
+            50,
+            "Neutral (swisseph not installed)",
+            "#f59e0b",
+            "Unknown",
+            0,
+            0,
+            [
+                (
+                    "⚠️ Setup Required",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "—",
+                    "Install swisseph and place ephe/ folder to enable SBC.",
+                    0,
+                )
+            ],
+        )
+
+    try:
+        EPHE_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), "ephe")
+        swe.set_ephe_path(EPHE_PATH)
+    except Exception:
+        EPHE_PATH = os.path.join(os.getcwd(), "ephe")
+        swe.set_ephe_path(EPHE_PATH)
     swe.set_sid_mode(swe.SIDM_LAHIRI)
     FLAGS = swe.FLG_SWIEPH | swe.FLG_SPEED | swe.FLG_SIDEREAL
 
@@ -687,36 +743,48 @@ def compute_sbc(symbol, data):
     def get_special(name, lon, speed, all_lons):
         special = []
 
-        # Retrograde
-        if speed < 0 and name != "Sun ☉":
+        # Derive the plain key used in all_lons  e.g. "Mars ♂" → "mars"
+        # BUG FIX: original used name.lower() which kept the emoji ("mars ♂"),
+        # so the self-skip `if o_name == name.lower()` never matched the plain
+        # key "mars" — causing every planet to compare itself against itself
+        # and always trigger Planetary War (abs(lon - lon) = 0 < 1.0).
+        my_key = name.split()[0].lower()
+
+        # Retrograde (Sun never retrogrades)
+        if speed < 0 and my_key != "sun":
             special.append("Retrograde")
 
-        # Combustion (tight orb)
-        if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8.0:
-            special.append("Combust")
+        # Combustion — planet within 8° of Sun (wrap-around safe)
+        if my_key != "sun":
+            diff = abs(lon - all_lons["sun"])
+            diff = min(diff, 360 - diff)
+            if diff < 8.0:
+                special.append("Combust")
 
-        # Planetary War - VERY RARE (Option A)
-        my_nak_idx = int((lon % 360) / (360 / 27))
-        for o_name, o_lon in all_lons.items():
-            if o_name == name.lower():
+        # Planetary War — two planets within 1° of each other
+        # Classic Vedic definition: orb-based, NOT nakshatra-based
+        for o_key, o_lon in all_lons.items():
+            if o_key == my_key:  # correctly skips self
                 continue
-            o_nak_idx = int((o_lon % 360) / (360 / 27))
-            if my_nak_idx == o_nak_idx and abs(o_lon - lon) < 1.0:  # ← Strict 1° rule
+            diff = abs(o_lon - lon)
+            diff = min(diff, 360 - diff)  # wrap-around safe
+            if diff < 1.0:
                 special.append("Planetary War")
                 break
 
-        # Abhijit influence
-        if 276 <= (lon % 360) <= 280:
+        # Abhijit nakshatra (Capricorn 6°40′–10°, i.e. 276°–280° sidereal)
+        if 276.0 <= (lon % 360) <= 280.0:
             special.append("Abhijit")
 
-        # Multiple planets in same nakshatra (separate note)
+        # Conjunction in Same Nakshatra (any other planet shares nakshatra,
+        # but not already a full Planetary War)
         my_nak_idx = int((lon % 360) / (360 / 27))
         count_same = sum(
             1
-            for o_lon in all_lons.values()
-            if int((o_lon % 360) / (360 / 27)) == my_nak_idx
+            for o_key, o_lon in all_lons.items()
+            if o_key != my_key and int((o_lon % 360) / (360 / 27)) == my_nak_idx
         )
-        if count_same >= 2 and "Planetary War" not in special:
+        if count_same >= 1 and "Planetary War" not in special:
             special.append("Conjunction in Same Nakshatra")
 
         return " + ".join(special) if special else "Normal"
@@ -735,7 +803,14 @@ def compute_sbc(symbol, data):
         "telecom": ["Mercury ☿"],
         "default": ["Jupiter ♃", "Venus ♀"],
     }
-    key_planets = sector_keywords.get(sector, sector_keywords["default"])
+    # Sector keyword lookup — use substring match since yfinance returns
+    # full strings like "Financial Services", "Health Care", "Consumer Defensive"
+    # that never exactly match short keys like "financial", "pharmaceutical".
+    key_planets = sector_keywords["default"]
+    for kw, planets in sector_keywords.items():
+        if kw != "default" and kw in sector:
+            key_planets = planets
+            break
 
     all_lons = {
         "sun": sun_lon,
@@ -757,8 +832,8 @@ def compute_sbc(symbol, data):
         ("Jupiter ♃", jupiter_lon, jup_speed),
         ("Venus ♀", venus_lon, ven_speed),
         ("Saturn ♄", saturn_lon, sat_speed),
-        ("Rahu ☊", rahu_lon, 0),
-        ("Ketu ☋", ketu_lon, 0),
+        ("Rahu ☊", rahu_lon, -0.053),  # Rahu is always retrograde in Vedic astrology
+        ("Ketu ☋", ketu_lon, -0.053),  # Ketu moves opposite to Rahu, also retrograde
     ]
 
     planet_data = []
@@ -820,107 +895,6 @@ def compute_sbc(symbol, data):
     malefic = sum(1 for p in planet_data if p[10] < 0)
 
     return sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data
-
-    # =========================================================
-    # BUILD SBC TABLE
-    # =========================================================
-
-    for planet_name, lon in planets:
-
-        p_idx, p_nak = lon_to_nakshatra(lon)
-
-        p_sign = lon_to_sign(lon)
-
-        vedha, weight = check_vedha(p_idx, stock_nak_idx, planet_name)
-
-        sbc_raw += weight
-
-        # Impact Description
-        if weight >= 3:
-
-            impact = (
-                f"{planet_name} in {p_nak} ({p_sign}) "
-                f"creates strong bullish Vedha on {stock_nak}."
-            )
-
-        elif weight == 2:
-
-            impact = (
-                f"{planet_name} in {p_nak} ({p_sign}) " f"supports positive momentum."
-            )
-
-        elif weight <= -2:
-
-            impact = (
-                f"{planet_name} in {p_nak} ({p_sign}) "
-                f"creates strong negative Vedha."
-            )
-
-        elif weight == 1:
-
-            impact = (
-                f"{planet_name} in {p_nak} ({p_sign}) "
-                f"gives mild positive influence."
-            )
-
-        elif weight == -1:
-
-            impact = (
-                f"{planet_name} in {p_nak} ({p_sign}) "
-                f"gives mild negative influence."
-            )
-
-        else:
-
-            impact = f"{planet_name} in {p_nak} ({p_sign}) " f"is neutral."
-
-        planet_data.append(
-            (planet_name, p_sign, p_nak, vedha, "Placed", impact, weight)
-        )
-
-    # =========================================================
-    # FINAL SBC SCORE
-    # =========================================================
-
-    sbc_score = max(15, min(95, int(50 + sbc_raw * 3.0)))
-
-    if sbc_score >= 75:
-
-        sbc_label = "Strongly Bullish"
-
-    elif sbc_score >= 62:
-
-        sbc_label = "Bullish"
-
-    elif sbc_score >= 48:
-
-        sbc_label = "Neutral"
-
-    else:
-
-        sbc_label = "Bearish"
-
-    if sbc_score >= 62:
-
-        sbc_color = "#10b981"
-
-    elif sbc_score >= 48:
-
-        sbc_color = "#f59e0b"
-
-    else:
-
-        sbc_color = "#ef4444"
-
-    benefic = sum(1 for p in planet_data if p[6] > 0)
-
-    malefic = sum(1 for p in planet_data if p[6] < 0)
-
-    # =========================================================
-    # RETURN
-    # =========================================================
-
-    return (sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data)
 
 
 def combined_verdict(tech_score, gann_confluence, sbc_score):
@@ -1225,7 +1199,7 @@ with tab_scanner:
                             name=d["name"],
                             price=d["price"],
                             change=d["change_pct"],
-                            score=score,
+                            score=min(score, 100),  # cap at 100
                             reasons=reasons,
                             criteria=criteria,
                             rsi=d["rsi"],
@@ -1245,7 +1219,7 @@ with tab_scanner:
                             rr=rr,
                         )
                     )
-            except:
+            except Exception:
                 pass
 
         prog.empty()
@@ -1354,7 +1328,7 @@ with tab_analyzer:
 
     symbol = symbol_input.strip().upper()
 
-    if symbol:
+    if symbol and (search_clicked or symbol):  # run on button click or on Enter/type
         data = fetch_stock_data(symbol)
 
         if not data:
