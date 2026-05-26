@@ -125,14 +125,17 @@ def kpi(label, val, color="#e8edf5", sub=None):
 
 
 # ====================== DATA FETCH ==========================================
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_stock_data(symbol):
+    """Improved live fetch with clear LIVE/DEMO status"""
     try:
         tk = yf.Ticker(f"{symbol}.NS")
         info = tk.info
         hist = tk.history(period="1y")
-        if hist.empty:
-            raise ValueError("empty")
+
+        if hist.empty or len(hist) < 10:
+            raise ValueError("Empty history")
+
         price = float(
             info.get("currentPrice")
             or info.get("regularMarketPrice")
@@ -140,28 +143,23 @@ def fetch_stock_data(symbol):
         )
         prev = float(info.get("previousClose") or hist["Close"].iloc[-2])
         chg = round((price - prev) / prev * 100, 2)
+
+        # Technicals
         delta = hist["Close"].diff()
         g = delta.clip(lower=0).rolling(14).mean()
         l = (-delta.clip(upper=0)).rolling(14).mean()
         rsi_raw = 100 - 100 / (1 + g / l)
-        rsi = round(float(rsi_raw.iloc[-1]), 1)
-        if math.isnan(rsi):
-            rsi = 50.0
-        tr = pd.concat(
-            [
-                hist["High"] - hist["Low"],
-                (hist["High"] - hist["Close"].shift()).abs(),
-                (hist["Low"] - hist["Close"].shift()).abs(),
-            ],
-            axis=1,
-        ).max(axis=1)
+        rsi = round(float(rsi_raw.iloc[-1]), 1) if not math.isnan(rsi_raw.iloc[-1]) else 50.0
+
+        tr = pd.concat([
+            hist["High"] - hist["Low"],
+            (hist["High"] - hist["Close"].shift()).abs(),
+            (hist["Low"] - hist["Close"].shift()).abs()
+        ], axis=1).max(axis=1)
         atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
-        atr_pct = round(atr / price * 100, 2)
-        br = info.get("beta")
-        try:
-            beta = float(br) if br and not math.isnan(float(br)) else 1.0
-        except:
-            beta = 1.0
+        atr_pct = round(atr / price * 100, 2) if price > 0 else 0
+
+        beta = float(info.get("beta") or 1.0)
         volume = int(info.get("volume") or hist["Volume"].iloc[-1])
         pe = round(float(info.get("trailingPE") or 25), 1)
         pb_val = round(float(info.get("priceToBook") or 3.5), 2)
@@ -169,6 +167,7 @@ def fetch_stock_data(symbol):
         name = info.get("longName", symbol)
         w52h = round(float(hist["High"].max()), 2)
         w52l = round(float(hist["Low"].min()), 2)
+
         return dict(
             price=round(price, 2),
             change_pct=chg,
@@ -186,7 +185,10 @@ def fetch_stock_data(symbol):
             w52h=w52h,
             w52l=w52l,
         )
-    except:
+
+    except Exception as e:
+        # Only fallback when truly failed
+        st.warning(f"⚠️ Live data fetch failed for {symbol} — using demo data")
         return dict(
             price=334.55,
             change_pct=3.46,
@@ -204,7 +206,6 @@ def fetch_stock_data(symbol):
             w52h=420.0,
             w52l=240.0,
         )
-
 
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_technicals(data):
