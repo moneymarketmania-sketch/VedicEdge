@@ -149,13 +149,20 @@ def fetch_stock_data(symbol):
         g = delta.clip(lower=0).rolling(14).mean()
         l = (-delta.clip(upper=0)).rolling(14).mean()
         rsi_raw = 100 - 100 / (1 + g / l)
-        rsi = round(float(rsi_raw.iloc[-1]), 1) if not math.isnan(rsi_raw.iloc[-1]) else 50.0
+        rsi = (
+            round(float(rsi_raw.iloc[-1]), 1)
+            if not math.isnan(rsi_raw.iloc[-1])
+            else 50.0
+        )
 
-        tr = pd.concat([
-            hist["High"] - hist["Low"],
-            (hist["High"] - hist["Close"].shift()).abs(),
-            (hist["Low"] - hist["Close"].shift()).abs()
-        ], axis=1).max(axis=1)
+        tr = pd.concat(
+            [
+                hist["High"] - hist["Low"],
+                (hist["High"] - hist["Close"].shift()).abs(),
+                (hist["Low"] - hist["Close"].shift()).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
         atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
         atr_pct = round(atr / price * 100, 2) if price > 0 else 0
 
@@ -206,6 +213,7 @@ def fetch_stock_data(symbol):
             w52h=420.0,
             w52l=240.0,
         )
+
 
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_technicals(data):
@@ -547,13 +555,8 @@ def compute_gann_confluence(data):
 
 def compute_sbc(symbol, data):
     """
-    COMPLETE 6-Layer Sarvatobhadra Chakra (SBC)
-    Layer 1: Vedha
-    Layer 2: Placement Strength
-    Layer 3: Chakra House
-    Layer 4: Drishti / Aspects
-    Layer 5: Special Combinations
-    Layer 6: Stock-Specific Sector Mapping
+    COMPLETE 6-Layer Sarvatobhadra Chakra (SBC) - Strict & Transparent
+    Layer 5 now uses very strict triggers as per your preference.
     """
     import swisseph as swe
     import hashlib
@@ -595,7 +598,7 @@ def compute_sbc(symbol, data):
         "Revati",
     ]
 
-    # Stock Nakshatra (Layer 1 base)
+    # Stock Nakshatra
     sym_hash = int(hashlib.md5(symbol.encode()).hexdigest(), 16)
     stock_nak_idx = sym_hash % 27
     stock_nak = nakshatras[stock_nak_idx]
@@ -680,34 +683,44 @@ def compute_sbc(symbol, data):
             return "Powerful Aspect", 1 if name in ["Jupiter ♃", "Venus ♀"] else -2
         return "No Aspect", 0
 
-    # Layer 5: Special Combinations
-        # Layer 5: Special Combinations (Fixed)
+    # Layer 5: Special Combinations - STRICT as per your preference
     def get_special(name, lon, speed, all_lons):
         special = []
-        
+
         # Retrograde
         if speed < 0 and name != "Sun ☉":
             special.append("Retrograde")
-        
-        # Combustion (very close to Sun)
+
+        # Combustion (tight orb)
         if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8.0:
             special.append("Combust")
-        
-        # Planetary War → Much stricter (same nakshatra + very close degree)
+
+        # Planetary War - VERY RARE (Option A)
         my_nak_idx = int((lon % 360) / (360 / 27))
         for o_name, o_lon in all_lons.items():
             if o_name == name.lower():
                 continue
             o_nak_idx = int((o_lon % 360) / (360 / 27))
-            if my_nak_idx == o_nak_idx and abs(o_lon - lon) < 3.0:   # ← tightened
+            if my_nak_idx == o_nak_idx and abs(o_lon - lon) < 1.0:  # ← Strict 1° rule
                 special.append("Planetary War")
                 break
-        
+
         # Abhijit influence
         if 276 <= (lon % 360) <= 280:
             special.append("Abhijit")
-        
+
+        # Multiple planets in same nakshatra (separate note)
+        my_nak_idx = int((lon % 360) / (360 / 27))
+        count_same = sum(
+            1
+            for o_lon in all_lons.values()
+            if int((o_lon % 360) / (360 / 27)) == my_nak_idx
+        )
+        if count_same >= 2 and "Planetary War" not in special:
+            special.append("Conjunction in Same Nakshatra")
+
         return " + ".join(special) if special else "Normal"
+
     # Layer 6: Stock-Specific Sector Mapping
     sector = data.get("sector", "Unknown").lower()
     sector_keywords = {
@@ -724,7 +737,6 @@ def compute_sbc(symbol, data):
     }
     key_planets = sector_keywords.get(sector, sector_keywords["default"])
 
-    # Prepare longitudes
     all_lons = {
         "sun": sun_lon,
         "moon": moon_lon,
@@ -766,7 +778,6 @@ def compute_sbc(symbol, data):
 
         special = get_special(name, lon, speed, all_lons)
 
-        # Layer 6: Sector alignment
         sector_match = (
             "Strong Sector Alignment" if name in key_planets else "Neutral Sector"
         )
@@ -808,15 +819,9 @@ def compute_sbc(symbol, data):
     benefic = sum(1 for p in planet_data if p[10] > 0)
     malefic = sum(1 for p in planet_data if p[10] < 0)
 
-    return (
-        sbc_score,
-        sbc_label,
-        sbc_color,
-        stock_nak,
-        benefic,
-        malefic,
-        planet_data,
-    )  # =========================================================
+    return sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data
+
+    # =========================================================
     # BUILD SBC TABLE
     # =========================================================
 
@@ -1913,7 +1918,7 @@ with tab_analyzer:
                 unsafe_allow_html=True,
             )
             st.caption(
-                f"✅ FULL 6-Layer SBC Analysis • {datetime.now().strftime('%d %b %Y')}"
+                f"✅ Full 6-Layer SBC • Strict Layer 5 • {datetime.now().strftime('%d %b %Y')}"
             )
 
             sb1, sb2, sb3 = st.columns(3)
