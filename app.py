@@ -681,21 +681,33 @@ def compute_sbc(symbol, data):
         return "No Aspect", 0
 
     # Layer 5: Special Combinations
+        # Layer 5: Special Combinations (Fixed)
     def get_special(name, lon, speed, all_lons):
         special = []
-        if speed < 0:
+        
+        # Retrograde
+        if speed < 0 and name != "Sun ☉":
             special.append("Retrograde")
-        if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8:
+        
+        # Combustion (very close to Sun)
+        if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8.0:
             special.append("Combust")
-        my_idx = int((lon % 360) / (360 / 27))
+        
+        # Planetary War → Much stricter (same nakshatra + very close degree)
+        my_nak_idx = int((lon % 360) / (360 / 27))
         for o_name, o_lon in all_lons.items():
-            if o_name != name.lower() and abs(o_lon - lon) < 13.33:
+            if o_name == name.lower():
+                continue
+            o_nak_idx = int((o_lon % 360) / (360 / 27))
+            if my_nak_idx == o_nak_idx and abs(o_lon - lon) < 3.0:   # ← tightened
                 special.append("Planetary War")
                 break
-        if 276 <= lon % 360 <= 280:
+        
+        # Abhijit influence
+        if 276 <= (lon % 360) <= 280:
             special.append("Abhijit")
+        
         return " + ".join(special) if special else "Normal"
-
     # Layer 6: Stock-Specific Sector Mapping
     sector = data.get("sector", "Unknown").lower()
     sector_keywords = {
