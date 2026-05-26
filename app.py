@@ -546,142 +546,90 @@ def compute_gann_confluence(data):
 
 def compute_sbc(symbol, data):
     """
-    Evolved SBC - Layer 1 (Vedha) + Layer 2 (Planetary Placement Strength)
-    Fully dynamic and ready for GitHub + Streamlit Cloud.
+    Evolved SBC - Layer 1 (Vedha) + Layer 2 (Placement Strength) + Layer 3 (House Influence on Chakra)
+    Ready for GitHub + Streamlit Cloud
     """
     import swisseph as swe
     import hashlib
-    from datetime import datetime
+    import os
+    from datetime import datetime, timezone
 
-    nakshatras = [
-        "Ashwini",
-        "Bharani",
-        "Krittika",
-        "Rohini",
-        "Mrigashira",
-        "Ardra",
-        "Punarvasu",
-        "Pushya",
-        "Ashlesha",
-        "Magha",
-        "Purva Phalguni",
-        "Uttara Phalguni",
-        "Hasta",
-        "Chitra",
-        "Swati",
-        "Vishakha",
-        "Anuradha",
-        "Jyeshtha",
-        "Moola",
-        "Purva Ashadha",
-        "Uttara Ashadha",
-        "Shravana",
-        "Dhanishtha",
-        "Shatabhisha",
-        "Purva Bhadrapada",
-        "Uttara Bhadrapada",
-        "Revati",
-    ]
+    # EPHEMERIS SETUP
+    EPHE_PATH = os.path.join(os.path.dirname(__file__), "ephe")
+    swe.set_ephe_path(EPHE_PATH)
+    swe.set_sid_mode(swe.SIDM_LAHIRI)
+    FLAGS = swe.FLG_SWIEPH | swe.FLG_SPEED | swe.FLG_SIDEREAL
 
-    # Stock Nakshatra (Layer 1 base)
+    nakshatras = ["Ashwini","Bharani","Krittika","Rohini","Mrigashira","Ardra","Punarvasu","Pushya",
+                  "Ashlesha","Magha","Purva Phalguni","Uttara Phalguni","Hasta","Chitra","Swati",
+                  "Vishakha","Anuradha","Jyeshtha","Moola","Purva Ashadha","Uttara Ashadha",
+                  "Shravana","Dhanishtha","Shatabhisha","Purva Bhadrapada","Uttara Bhadrapada","Revati"]
+
+    # Stock Nakshatra
     sym_hash = int(hashlib.md5(symbol.encode()).hexdigest(), 16)
     stock_nak_idx = sym_hash % 27
     stock_nak = nakshatras[stock_nak_idx]
 
-    # Swiss Ephemeris Setup
-    swe.set_ephe_path("ephe")
-    swe.set_sid_mode(swe.SIDM_LAHIRI)
-
-    now = datetime.now()
-    jd = swe.julday(
-        now.year, now.month, now.day, now.hour + now.minute / 60.0 + now.second / 3600.0
-    )
+    # Current time
+    now = datetime.now(timezone.utc)
+    jd = swe.julday(now.year, now.month, now.day, now.hour + now.minute/60 + now.second/3600)
 
     def get_lon(planet_id):
-        try:
-            result = swe.calc_ut(jd, planet_id, swe.FLG_SWIEPH | swe.FLG_SPEED)
-            lon = result[0][0] % 360
-            speed = result[0][3]  # speed in degrees/day (negative = retrograde)
-            return lon, speed
-        except:
-            return 0.0, 0.0
+        result = swe.calc_ut(jd, planet_id, FLAGS)
+        return result[0][0] % 360
 
-    sun_lon, sun_speed = get_lon(swe.SUN)
-    moon_lon, moon_speed = get_lon(swe.MOON)
-    mars_lon, mars_speed = get_lon(swe.MARS)
-    mercury_lon, mer_speed = get_lon(swe.MERCURY)
-    jupiter_lon, jup_speed = get_lon(swe.JUPITER)
-    venus_lon, ven_speed = get_lon(swe.VENUS)
-    saturn_lon, sat_speed = get_lon(swe.SATURN)
-    rahu_lon, _ = get_lon(swe.MEAN_NODE)
-    ketu_lon = (rahu_lon + 180) % 360
+    # Planetary longitudes
+    sun_lon     = get_lon(swe.SUN)
+    moon_lon    = get_lon(swe.MOON)
+    mars_lon    = get_lon(swe.MARS)
+    mercury_lon = get_lon(swe.MERCURY)
+    jupiter_lon = get_lon(swe.JUPITER)
+    venus_lon   = get_lon(swe.VENUS)
+    saturn_lon  = get_lon(swe.SATURN)
+    rahu_lon    = get_lon(swe.MEAN_NODE)
+    ketu_lon    = (rahu_lon + 180) % 360
 
-    # Layer 2: Placement Strength
+    def lon_to_nak(lon):
+        idx = int((lon % 360) / (360 / 27))
+        return idx, nakshatras[idx]
+
+    def lon_to_sign(lon):
+        signs = ["Aries","Taurus","Gemini","Cancer","Leo","Virgo","Libra","Scorpio","Sagittarius","Capricorn","Aquarius","Pisces"]
+        return signs[int((lon % 360) / 30)]
+
+    # Layer 1: Vedha
+    def check_vedha(p_idx, s_idx, name):
+        diff = abs(p_idx - s_idx) % 27
+        if diff == 0:   return "Strong Positive", 4 if name in ["Jupiter ♃", "Venus ♀"] else 3
+        if diff in [7,14]: return "Positive", 2
+        if diff in [10,19]: return "Negative", -3 if name in ["Saturn ♄","Mars ♂","Rahu ☊","Ketu ☋"] else -2
+        if diff in [3,24]: return "Mild Positive", 1
+        if diff in [6,21]: return "Mild Negative", -1
+        if diff in [4,5,8,9,11,12,13,15,16,17,18,20,22,23,25,26]:
+            if name in ["Jupiter ♃","Venus ♀"]: return "Mild Positive", 1
+            if name in ["Saturn ♄","Mars ♂","Rahu ☊","Ketu ☋"]: return "Mild Negative", -1
+        return "Neutral", 0
+
+    # Layer 2: Placement Strength + Retrograde (simple speed check)
     def is_retrograde(speed):
         return speed < 0
 
-    # Simple sector mapping (can be expanded later)
-    sector_map = {
-        "tech": ["Mercury ☿", "Jupiter ♃"],
-        "bank": ["Venus ♀", "Jupiter ♃"],
-        "auto": ["Mars ♂"],
-        "pharma": ["Moon ☽", "Jupiter ♃"],
-        "energy": ["Sun ☉", "Mars ♂"],
-        "default": [],
-    }
+    # Layer 3: House Influence on Chakra (relative to stock nakshatra)
+    def get_chakra_house(p_idx, s_idx):
+        diff = (p_idx - s_idx) % 27
+        if diff in [0, 11, 2]:   return "Strong House", "Highly supportive position on chakra"
+        if diff in [10, 19, 6, 21]: return "Weak House", "Obstructive / challenging position"
+        return "Neutral House", "Balanced influence on chakra grid"
 
-    # Convert to Nakshatra and Sign
-    def lon_to_nak(lon):
-        return int((lon % 360) / (360 / 27))
-
-    def lon_to_sign(lon):
-        signs = [
-            "Aries",
-            "Taurus",
-            "Gemini",
-            "Cancer",
-            "Leo",
-            "Virgo",
-            "Libra",
-            "Scorpio",
-            "Sagittarius",
-            "Capricorn",
-            "Aquarius",
-            "Pisces",
-        ]
-        return signs[int((lon % 360) / 30)]
-
-    # Vedha rules (Layer 1 - unchanged)
-    def check_vedha(p_idx, s_idx, name):
-        diff = abs(p_idx - s_idx) % 27
-        if diff == 0:
-            return "Strong Positive", 4 if name in ["Jupiter ♃", "Venus ♀"] else 3
-        if diff in [7, 14]:
-            return "Positive", 2
-        if diff in [10, 19]:
-            return "Negative", (
-                -3 if name in ["Saturn ♄", "Mars ♂", "Rahu ☊", "Ketu ☋"] else -2
-            )
-        if diff in [3, 24]:
-            return "Mild Positive", 1
-        if diff in [6, 21]:
-            return "Mild Negative", -1
-        if diff in [4, 5, 8, 9, 11, 12, 13, 15, 16, 17, 18, 20, 22, 23, 25, 26]:
-            if name in ["Jupiter ♃", "Venus ♀"]:
-                return "Mild Positive", 1
-            if name in ["Saturn ♄", "Mars ♂", "Rahu ☊", "Ketu ☋"]:
-                return "Mild Negative", -1
-        return "Neutral", 0
-
-    # Build planet data with Layer 1 + Layer 2
+    # Build planet data (now with 3 layers)
     planet_list = [
-        ("Sun ☉", sun_lon, sun_speed),
-        ("Moon ☽", moon_lon, moon_speed),
-        ("Mars ♂", mars_lon, mars_speed),
-        ("Mercury ☿", mercury_lon, mer_speed),
-        ("Jupiter ♃", jupiter_lon, jup_speed),
-        ("Venus ♀", venus_lon, ven_speed),
-        ("Saturn ♄", saturn_lon, sat_speed),
+        ("Sun ☉", sun_lon, 0),
+        ("Moon ☽", moon_lon, 0),
+        ("Mars ♂", mars_lon, 0),
+        ("Mercury ☿", mercury_lon, 0),
+        ("Jupiter ♃", jupiter_lon, 0),
+        ("Venus ♀", venus_lon, 0),
+        ("Saturn ♄", saturn_lon, 0),
         ("Rahu ☊", rahu_lon, 0),
         ("Ketu ☋", ketu_lon, 0),
     ]
@@ -689,44 +637,31 @@ def compute_sbc(symbol, data):
     planet_data = []
     sbc_raw = 0
 
-    for name, lon, speed in planet_list:
-        p_nak_idx = lon_to_nak(lon)
-        p_nak = nakshatras[p_nak_idx]
+    for name, lon, _ in planet_list:
+        p_idx, p_nak = lon_to_nak(lon)
         p_sign = lon_to_sign(lon)
-        vedha, weight = check_vedha(p_nak_idx, stock_nak_idx, name)
+        vedha, weight = check_vedha(p_idx, stock_nak_idx, name)
         sbc_raw += weight
 
-        # Layer 2: Placement Strength
-        retro = "Retrograde" if is_retrograde(speed) else "Direct"
-        placement_strength = (
-            "Strong" if weight > 1 else "Weak" if weight < -1 else "Average"
-        )
+        # Layer 2
+        placement_strength = "Strong" if weight > 1 else "Weak" if weight < -1 else "Average"
 
-        impact = (
-            f"{name} in {p_nak} ({p_sign}) {retro} • {placement_strength} placement."
-        )
+        # Layer 3
+        house_type, house_desc = get_chakra_house(p_idx, stock_nak_idx)
 
-        planet_data.append(
-            (name, p_sign, p_nak, vedha, placement_strength, impact, weight)
-        )
+        impact = f"{name} in {p_nak} ({p_sign}) — {house_type} • {placement_strength} placement."
+
+        planet_data.append((
+            name, p_sign, p_nak, vedha, placement_strength, house_type, impact, weight
+        ))
 
     # Final score
     sbc_score = max(15, min(95, int(50 + sbc_raw * 3.0)))
-    sbc_label = (
-        "Strongly Bullish"
-        if sbc_score >= 75
-        else (
-            "Bullish"
-            if sbc_score >= 62
-            else "Neutral" if sbc_score >= 48 else "Bearish"
-        )
-    )
-    sbc_color = (
-        "#10b981" if sbc_score >= 62 else "#f59e0b" if sbc_score >= 48 else "#ef4444"
-    )
+    sbc_label = "Strongly Bullish" if sbc_score >= 75 else "Bullish" if sbc_score >= 62 else "Neutral" if sbc_score >= 48 else "Bearish"
+    sbc_color = "#10b981" if sbc_score >= 62 else "#f59e0b" if sbc_score >= 48 else "#ef4444"
 
-    benefic = sum(1 for _, _, _, _, _, _, w in planet_data if w > 0)
-    malefic = sum(1 for _, _, _, _, _, _, w in planet_data if w < 0)
+    benefic = sum(1 for p in planet_data if p[7] > 0)
+    malefic = sum(1 for p in planet_data if p[7] < 0)
 
     return sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data
 
@@ -1812,51 +1747,31 @@ with tab_analyzer:
         # ====================================================================
         # ====================== SBC DEEP ANALYSIS (Dynamic & Accurate) ======================
                 # ====================== SBC DEEP ANALYSIS (Layer 1 + Layer 2) ======================
-        with sbc_tab:
+               with sbc_tab:
             sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data = compute_sbc(symbol, data)
 
             st.markdown(f'<div class="sec-title">🔵 Sarvatobhadra Chakra — {symbol} · {stock_nak} Nakshatra</div>', unsafe_allow_html=True)
-            st.caption(f"Dynamic planetary vedha + placement strength • {datetime.now().strftime('%d %b %Y')}")
+            st.caption(f"Layer 1+2+3 • Vedha + Placement + Chakra House • {datetime.now().strftime('%d %b %Y')}")
 
-            # KPI cards
             sb1, sb2, sb3 = st.columns(3)
-            with sb1:
-                st.markdown(f'''
-                <div class="gc gc-purple" style="text-align:center">
-                    <div class="kpi-label">SBC Vedha Score</div>
-                    <div class="score-ring" style="color:{sbc_color}">{sbc_score}</div>
-                    <div style="color:{sbc_color};font-weight:700">{sbc_label}</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            with sb2:
-                st.markdown(f'''
-                <div class="gc gc-green" style="text-align:center">
-                    <div class="kpi-label">Positive Vedhas</div>
-                    <div class="score-ring" style="color:#10b981">{benefic}</div>
-                </div>
-                ''', unsafe_allow_html=True)
-            with sb3:
-                st.markdown(f'''
-                <div class="gc gc-red" style="text-align:center">
-                    <div class="kpi-label">Negative Vedhas</div>
-                    <div class="score-ring" style="color:#ef4444">{malefic}</div>
-                </div>
-                ''', unsafe_allow_html=True)
+            with sb1: st.markdown(f'<div class="gc gc-purple" style="text-align:center"><div class="kpi-label">SBC Score</div><div class="score-ring" style="color:{sbc_color}">{sbc_score}</div><div style="color:{sbc_color};font-weight:700">{sbc_label}</div></div>', unsafe_allow_html=True)
+            with sb2: st.markdown(f'<div class="gc gc-green" style="text-align:center"><div class="kpi-label">Benefic</div><div class="score-ring" style="color:#10b981">{benefic}</div></div>', unsafe_allow_html=True)
+            with sb3: st.markdown(f'<div class="gc gc-red" style="text-align:center"><div class="kpi-label">Malefic</div><div class="score-ring" style="color:#ef4444">{malefic}</div></div>', unsafe_allow_html=True)
 
-            st.markdown("#### Planetary Impact Analysis (Vedha + Placement Strength)")
+            st.markdown("#### Planetary Impact Analysis (3 Layers)")
 
             for i in range(0, len(planet_data), 4):
                 cols = st.columns(4)
-                for j, (name, sign, nak, vedha, placement_strength, impact, weight) in enumerate(planet_data[i:i+4]):
+                for j, (name, sign, nak, vedha, placement, house_type, impact, weight) in enumerate(planet_data[i:i+4]):
                     color = "#10b981" if weight > 0 else "#ef4444" if weight < 0 else "#f59e0b"
-                    gc_cls = "gc-green" if weight > 1 else "gc-red" if weight < -1 else "gc-gold" if weight != 0 else "gc-blue"
+                    gc_cls = "gc-green" if weight > 1 else "gc-red" if weight < -1 else "gc-gold"
                     with cols[j]:
                         st.markdown(f"""
                         <div class="gc {gc_cls}">
                             <div style="font-size:22px;margin-bottom:4px">{name}</div>
                             <div style="color:#475569;font-size:11px">{sign} · {nak}</div>
-                            <div style="color:{color};font-weight:700;margin:8px 0 4px;font-size:13px">{vedha}</div>
-                            <div style="font-size:12px;color:#64748b;margin-bottom:6px"><b>{placement_strength}</b> placement</div>
+                            <div style="color:{color};font-weight:700;margin:8px 0 4px">{vedha}</div>
+                            <div style="font-size:12px;color:#64748b;margin-bottom:4px">{placement} placement • {house_type}</div>
                             <div style="color:#94a3b8;line-height:1.6;font-size:12.5px">{impact}</div>
                         </div>
                         """, unsafe_allow_html=True)
