@@ -546,7 +546,12 @@ def compute_gann_confluence(data):
 
 def compute_sbc(symbol, data):
     """
-    Evolved SBC - Layer 1 (Vedha) + Layer 2 (Placement) + Layer 3 (Chakra House) + Layer 4 (Mutual Aspects/Drishti)
+    Evolved SBC - Layers 1 to 5
+    Layer 1: Vedha
+    Layer 2: Placement Strength
+    Layer 3: Chakra House
+    Layer 4: Drishti / Aspects
+    Layer 5: Special Combinations
     """
     import swisseph as swe
     import hashlib
@@ -600,16 +605,16 @@ def compute_sbc(symbol, data):
 
     def get_lon(planet_id):
         result = swe.calc_ut(jd, planet_id, FLAGS)
-        return result[0][0] % 360
+        return result[0][0] % 360, result[0][3]  # lon, speed
 
-    sun_lon = get_lon(swe.SUN)
-    moon_lon = get_lon(swe.MOON)
-    mars_lon = get_lon(swe.MARS)
-    mercury_lon = get_lon(swe.MERCURY)
-    jupiter_lon = get_lon(swe.JUPITER)
-    venus_lon = get_lon(swe.VENUS)
-    saturn_lon = get_lon(swe.SATURN)
-    rahu_lon = get_lon(swe.MEAN_NODE)
+    sun_lon, sun_speed = get_lon(swe.SUN)
+    moon_lon, moon_speed = get_lon(swe.MOON)
+    mars_lon, mars_speed = get_lon(swe.MARS)
+    mercury_lon, mer_speed = get_lon(swe.MERCURY)
+    jupiter_lon, jup_speed = get_lon(swe.JUPITER)
+    venus_lon, ven_speed = get_lon(swe.VENUS)
+    saturn_lon, sat_speed = get_lon(swe.SATURN)
+    rahu_lon, _ = get_lon(swe.MEAN_NODE)
     ketu_lon = (rahu_lon + 180) % 360
 
     def lon_to_nak(lon):
@@ -664,34 +669,67 @@ def compute_sbc(symbol, data):
             return "Weak House", "Obstructive"
         return "Neutral House", "Balanced"
 
-    # Layer 4: Mutual Aspects / Drishti
+    # Layer 4: Drishti / Aspects
     def get_drishti(p_idx, s_idx, name):
         diff = (p_idx - s_idx) % 27
-        if diff in [3, 10, 17]:  # 4th, 11th, 18th positions (common aspect points)
-            if name in ["Jupiter ♃", "Venus ♀"]:
-                return "Benefic Aspect", "+2"
-            return "Malefic Aspect", "-2"
-        if diff in [7, 14]:  # 8th, 15th (stronger aspect)
-            return "Powerful Aspect", "+1" if name in ["Jupiter ♃", "Venus ♀"] else "-1"
-        return "No Aspect", "0"
+        if diff in [3, 10, 17]:
+            return "Benefic Aspect", 2 if name in ["Jupiter ♃", "Venus ♀"] else -1
+        if diff in [7, 14]:
+            return "Powerful Aspect", 1 if name in ["Jupiter ♃", "Venus ♀"] else -2
+        return "No Aspect", 0
 
-    # Build data with 4 layers
+    # Layer 5: Special Combinations
+    def get_special_combinations(name, lon, speed, all_lons):
+        special = []
+        # Retrograde
+        if speed < 0:
+            special.append("Retrograde")
+        # Combustion (close to Sun)
+        if name != "Sun ☉" and abs(lon - all_lons["sun"]) < 8:
+            special.append("Combust")
+        # Planetary war / same nakshatra
+        my_idx = int((lon % 360) / (360 / 27))
+        for other_name, other_lon in all_lons.items():
+            if (
+                other_name != name.lower() and abs(other_lon - lon) < 13.33
+            ):  # same nakshatra
+                special.append("Planetary War")
+                break
+        # Abhijit influence (special 28th nakshatra zone)
+        if 276 <= lon % 360 <= 280:
+            special.append("Abhijit Influence")
+        return " + ".join(special) if special else "Normal"
+
+    # Prepare all longitudes for Layer 5
+    all_lons = {
+        "sun": sun_lon,
+        "moon": moon_lon,
+        "mars": mars_lon,
+        "mercury": mercury_lon,
+        "jupiter": jupiter_lon,
+        "venus": venus_lon,
+        "saturn": saturn_lon,
+        "rahu": rahu_lon,
+        "ketu": ketu_lon,
+    }
+
+    # Build planet data (5 layers)
     planet_list = [
-        ("Sun ☉", sun_lon),
-        ("Moon ☽", moon_lon),
-        ("Mars ♂", mars_lon),
-        ("Mercury ☿", mercury_lon),
-        ("Jupiter ♃", jupiter_lon),
-        ("Venus ♀", venus_lon),
-        ("Saturn ♄", saturn_lon),
-        ("Rahu ☊", rahu_lon),
-        ("Ketu ☋", ketu_lon),
+        ("Sun ☉", sun_lon, sun_speed),
+        ("Moon ☽", moon_lon, moon_speed),
+        ("Mars ♂", mars_lon, mars_speed),
+        ("Mercury ☿", mercury_lon, mer_speed),
+        ("Jupiter ♃", jupiter_lon, jup_speed),
+        ("Venus ♀", venus_lon, ven_speed),
+        ("Saturn ♄", saturn_lon, sat_speed),
+        ("Rahu ☊", rahu_lon, 0),
+        ("Ketu ☋", ketu_lon, 0),
     ]
 
     planet_data = []
     sbc_raw = 0
 
-    for name, lon in planet_list:
+    for name, lon, speed in planet_list:
         p_idx, p_nak = lon_to_nak(lon)
         p_sign = lon_to_sign(lon)
 
@@ -701,11 +739,13 @@ def compute_sbc(symbol, data):
         placement = (
             "Strong" if vedha_weight > 1 else "Weak" if vedha_weight < -1 else "Average"
         )
-        house_type, house_desc = get_chakra_house(p_idx, stock_nak_idx)
+        house_type, _ = get_chakra_house(p_idx, stock_nak_idx)
         drishti, drishti_weight = get_drishti(p_idx, stock_nak_idx, name)
-        sbc_raw += int(drishti_weight)
+        sbc_raw += drishti_weight
 
-        impact = f"{name} in {p_nak} ({p_sign}) — {house_type} • {placement} placement • {drishti}"
+        special = get_special_combinations(name, lon, speed, all_lons)
+
+        impact = f"{name} in {p_nak} ({p_sign}) — {house_type} • {placement} • {drishti} • {special}"
 
         planet_data.append(
             (
@@ -716,8 +756,9 @@ def compute_sbc(symbol, data):
                 placement,
                 house_type,
                 drishti,
+                special,
                 impact,
-                vedha_weight + int(drishti_weight),
+                vedha_weight + drishti_weight,
             )
         )
 
@@ -736,8 +777,8 @@ def compute_sbc(symbol, data):
         "#10b981" if sbc_score >= 62 else "#f59e0b" if sbc_score >= 48 else "#ef4444"
     )
 
-    benefic = sum(1 for p in planet_data if p[8] > 0)
-    malefic = sum(1 for p in planet_data if p[8] < 0)
+    benefic = sum(1 for p in planet_data if p[9] > 0)
+    malefic = sum(1 for p in planet_data if p[9] < 0)
 
     return sbc_score, sbc_label, sbc_color, stock_nak, benefic, malefic, planet_data
     # =========================================================
@@ -1820,8 +1861,7 @@ with tab_analyzer:
         # ====================================================================
         # TAB 3 — SBC (fully dynamic)
         # ====================================================================
-        # ====================== SBC DEEP ANALYSIS (Dynamic & Accurate) ======================
-        # ====================== SBC DEEP ANALYSIS (Layer 1 + Layer 2) ======================
+
         with sbc_tab:
             (
                 sbc_score,
@@ -1838,7 +1878,7 @@ with tab_analyzer:
                 unsafe_allow_html=True,
             )
             st.caption(
-                f"Layers 1–4 • Vedha + Placement + House + Drishti • {datetime.now().strftime('%d %b %Y')}"
+                f"Layers 1–5 Active • Vedha + Placement + House + Drishti + Special Combinations • {datetime.now().strftime('%d %b %Y')}"
             )
 
             sb1, sb2, sb3 = st.columns(3)
@@ -1858,7 +1898,7 @@ with tab_analyzer:
                     unsafe_allow_html=True,
                 )
 
-            st.markdown("#### Planetary Impact Analysis (4 Layers Active)")
+            st.markdown("#### Planetary Impact Analysis (5 Layers)")
 
             for i in range(0, len(planet_data), 4):
                 cols = st.columns(4)
@@ -1870,6 +1910,7 @@ with tab_analyzer:
                     placement,
                     house_type,
                     drishti,
+                    special,
                     impact,
                     weight,
                 ) in enumerate(planet_data[i : i + 4]):
@@ -1891,7 +1932,8 @@ with tab_analyzer:
                             <div style="color:#475569;font-size:11px">{sign} · {nak}</div>
                             <div style="color:{color};font-weight:700;margin:8px 0 4px">{vedha}</div>
                             <div style="font-size:12px;color:#64748b;margin-bottom:4px">
-                                {placement} • {house_type} • {drishti}
+                                {placement} • {house_type} • {drishti}<br>
+                                <span style="color:#f59e0b">{special}</span>
                             </div>
                             <div style="color:#94a3b8;line-height:1.6;font-size:12.5px">{impact}</div>
                         </div>
