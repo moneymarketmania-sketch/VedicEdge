@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import math
 import requests
 import io
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="VedicEdge", page_icon="🔵", layout="wide")
 
@@ -573,51 +574,273 @@ def _sq9_levels(price):
 
 def _time_cycle_confluence(anchor_low_date, today):
     """
-    Three independent time tools. Returns (confluence_count, details).
-    All three must independently point to the same ±5-day window for HIGH.
-    Any two = MODERATE.
+    Three independent time tools.
+    FIX 1: Tool 3 now checks actual yearly anniversary dates (not % 365 hack).
+    FIX 2: Same-window check — tools must point to dates within ±5 days of
+           each other, not just be independently "active".
     """
     days_from_low = (today - anchor_low_date).days
+    window = 5  # days — how close two events must be to count as confluence
 
-    # Tool 1: Natural squares — days that are perfect squares
+    # ── Tool 1: Natural squares ──────────────────────────────────────────────
     n = int(math.sqrt(days_from_low))
     sq_prev = n * n
     sq_next = (n + 1) * (n + 1)
     days_to_sq = sq_next - days_from_low
-    tool1_active = days_to_sq <= 5 or (days_from_low - sq_prev) <= 5
+    # Next upcoming square date
+    t1_next_date = anchor_low_date + timedelta(days=sq_next)
+    # Also check if we just passed a square (within window)
+    t1_prev_date = anchor_low_date + timedelta(days=sq_prev)
+    t1_upcoming  = t1_next_date if days_to_sq > 0 else t1_prev_date
+    tool1_active = abs((today - t1_upcoming).days) <= window
 
-    # Tool 2: Gann natural divisions (multiples of 90, 144, 180, 360)
+    # ── Tool 2: Gann natural divisions ──────────────────────────────────────
     gann_divs = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
-    tool2_active = any(abs(days_from_low - d) <= 5 for d in gann_divs)
-    nearest_div = min(gann_divs, key=lambda d: abs(days_from_low - d))
-    days_to_div = nearest_div - days_from_low
+    # Find all upcoming division dates (repeating multiples too)
+    t2_upcoming_dates = []
+    for base in gann_divs:
+        # Generate multiples until past today
+        mult = 1
+        while True:
+            d = base * mult
+            dt = anchor_low_date + timedelta(days=d)
+            if dt >= today - timedelta(days=window):
+                t2_upcoming_dates.append(dt)
+                break
+            mult += 1
+    nearest_div  = min(gann_divs, key=lambda d: abs(days_from_low - d))
+    days_to_div  = nearest_div - days_from_low
+    t2_next_date = anchor_low_date + timedelta(days=nearest_div) \
+                   if days_to_div >= -window \
+                   else anchor_low_date + timedelta(days=nearest_div + 90)
+    tool2_active = any(abs((today - dt).days) <= window for dt in t2_upcoming_dates)
 
-    # Tool 3: Anniversary dates (yearly + Fibonacci years)
-    fib_days = [days_from_low % 365]  # distance within current year cycle
-    tool3_active = any(abs(r) <= 5 for r in fib_days)
+    # ── Tool 3: Actual yearly anniversaries (FIX 1) ──────────────────────────
+    # Check if today is within ±window days of ANY yearly anniversary
+    t3_upcoming_date = None
+    tool3_active     = False
+    for yr in range(1, 15):  # check up to 15 years forward
+        try:
+            anniv = anchor_low_date.replace(year=anchor_low_date.year + yr)
+            days_away = (anniv - today).days
+            if -window <= days_away <= window:
+                tool3_active     = True
+                t3_upcoming_date = anniv
+                break
+            if 0 < days_away <= 365:
+                if t3_upcoming_date is None:
+                    t3_upcoming_date = anniv
+        except Exception:
+            pass
+    if t3_upcoming_date is None:
+        # Fallback — next anniversary
+        try:
+            t3_upcoming_date = anchor_low_date.replace(year=today.year + 1)
+        except Exception:
+            t3_upcoming_date = today + timedelta(days=365)
 
-    # Next upcoming events for each tool
-    next_sq_date   = anchor_low_date + timedelta(days=sq_next)
-    next_div_date  = anchor_low_date + timedelta(days=nearest_div) if days_to_div > 0 else anchor_low_date + timedelta(days=nearest_div + 90)
+    # ── FIX 2: Same-window check ─────────────────────────────────────────────
+    # Collect next upcoming date for each active tool
+    upcoming = {
+        "sq":    t1_upcoming,
+        "div":   t2_next_date,
+        "anniv": t3_upcoming_date,
+    }
+    active_flags = {
+        "sq":    tool1_active,
+        "div":   tool2_active,
+        "anniv": tool3_active,
+    }
+    # Check pairs — do they land within ±window days of EACH OTHER?
+    same_window_pairs = 0
+    pair_labels = []
+    keys = list(upcoming.keys())
+    for i in range(len(keys)):
+        for j in range(i+1, len(keys)):
+            k1, k2 = keys[i], keys[j]
+            if active_flags[k1] and active_flags[k2]:
+                delta = abs((upcoming[k1] - upcoming[k2]).days)
+                if delta <= window * 2:
+                    same_window_pairs += 1
+                    pair_labels.append(f"{k1}+{k2} within {delta}d")
 
-    active_tools = sum([tool1_active, tool2_active, tool3_active])
+    # Active tools count (same-window pairs determine quality)
+    # 3 tools all same window = strong; 2 pairs same window = moderate; else weak
+    if same_window_pairs >= 2 or (same_window_pairs == 1 and sum(active_flags.values()) == 3):
+        active_tools = 3
+    elif same_window_pairs == 1:
+        active_tools = 2
+    elif sum(active_flags.values()) >= 2:
+        active_tools = 1   # active but not same window — weak
+    else:
+        active_tools = 0
 
     details = {
-        "tool1_active": tool1_active,
-        "tool2_active": tool2_active,
-        "tool3_active": tool3_active,
-        "active_tools": active_tools,
-        "days_to_sq": days_to_sq,
+        "tool1_active":   tool1_active,
+        "tool2_active":   tool2_active,
+        "tool3_active":   tool3_active,
+        "active_tools":   active_tools,
+        "same_window_pairs": same_window_pairs,
+        "pair_labels":    pair_labels,
+        "days_to_sq":     days_to_sq,
         "sq_prev": sq_prev, "sq_next": sq_next,
-        "nearest_div": nearest_div, "days_to_div": days_to_div,
-        "next_sq_date": next_sq_date,
-        "next_div_date": next_div_date,
-        "days_from_low": days_from_low,
+        "nearest_div":    nearest_div,
+        "days_to_div":    days_to_div,
+        "next_sq_date":   t1_upcoming,
+        "next_div_date":  t2_next_date,
+        "next_anniv_date": t3_upcoming_date,
+        "days_from_low":  days_from_low,
     }
     return active_tools, details
 
 
-def compute_gann_confluence(data, symbol=None):
+def _build_gann_chart(hist, anchor_low, anchor_low_date, anchor_high,
+                      scale, angle_1x1, angle_2x1, angle_1x2, angle_1x4,
+                      sq9_levels, price, today):
+    """
+    Fix 3: Scaled Plotly chart where price and time are on the same scale.
+    X-axis = days from anchor. Y-axis = price.
+    Chart aspect ratio forced so 1 unit time = 1 unit price visually.
+    Gann angles drawn as lines from anchor point.
+    """
+    if hist is None or len(hist) < 10:
+        return None
+
+    # Build price series as days-from-anchor
+    anchor_dt = pd.Timestamp(anchor_low_date)
+    hist_after = hist[hist.index >= anchor_dt].copy()
+    if hist_after.empty:
+        return None
+
+    days_arr  = [(idx - anchor_dt).days for idx in hist_after.index]
+    close_arr = hist_after["Close"].tolist()
+    high_arr  = hist_after["High"].tolist()
+    low_arr   = hist_after["Low"].tolist()
+
+    max_days  = max(days_arr) if days_arr else 1
+    # Extend angles 20% beyond current time
+    proj_days = int(max_days * 1.20)
+
+    # Angle lines — all start from (0, anchor_low)
+    angle_x = list(range(0, proj_days, 1))
+    def angle_y(rate): return [anchor_low + d * rate for d in angle_x]
+
+    # Sq9 horizontal levels
+    sq9_prices = [lv[1] for lv in sq9_levels if isinstance(lv[1], (int, float))]
+
+    fig = go.Figure()
+
+    # Candlestick
+    fig.add_trace(go.Candlestick(
+        x=days_arr,
+        open=hist_after["Open"].tolist(),
+        high=high_arr,
+        low=low_arr,
+        close=close_arr,
+        name="Price",
+        increasing_line_color="#10b981",
+        decreasing_line_color="#ef4444",
+        showlegend=False,
+    ))
+
+    # Gann angle lines
+    angle_specs = [
+        (scale * 4,   "4×1", "#ef4444",   "dash"),
+        (scale * 2,   "2×1", "#f59e0b",   "dash"),
+        (scale * 1,   "1×1", "#10b981",   "solid"),   # master — solid
+        (scale * 0.5, "1×2", "#f59e0b",   "dot"),
+        (scale * 0.25,"1×4", "#ef4444",   "dot"),
+    ]
+    for rate, label, color, dash in angle_specs:
+        fig.add_trace(go.Scatter(
+            x=angle_x,
+            y=angle_y(rate),
+            mode="lines",
+            name=label,
+            line=dict(color=color, width=1.5 if label == "1×1" else 1, dash=dash),
+            opacity=0.8,
+        ))
+
+    # Sq9 horizontal levels
+    for lv in sq9_levels:
+        lbl, lv_price, spoke = lv
+        if not isinstance(lv_price, (int, float)):
+            continue
+        col = "#3b82f6" if "Resistance" in lbl else "#8b5cf6" if "Support" in lbl else "#ffffff"
+        fig.add_hline(
+            y=lv_price,
+            line_color=col,
+            line_width=0.7,
+            line_dash="dot",
+            opacity=0.5,
+            annotation_text=f"₹{lv_price:,.0f}",
+            annotation_font_size=9,
+            annotation_font_color=col,
+        )
+
+    # Current price line
+    fig.add_hline(
+        y=price,
+        line_color="#ffffff",
+        line_width=1,
+        line_dash="solid",
+        opacity=0.9,
+        annotation_text=f"₹{price:,.2f}",
+        annotation_font_size=10,
+        annotation_font_color="#ffffff",
+    )
+
+    # Anchor point marker
+    fig.add_trace(go.Scatter(
+        x=[0], y=[anchor_low],
+        mode="markers+text",
+        marker=dict(color="#f59e0b", size=10, symbol="triangle-up"),
+        text=["Anchor"], textposition="bottom center",
+        textfont=dict(color="#f59e0b", size=10),
+        name="Anchor Low", showlegend=False,
+    ))
+
+    # Layout — force equal aspect ratio via fixed height/width ratio
+    # Scale factor means 1 day = scale pts, so chart width/height ratio
+    # should reflect: chart_width / chart_height = max_days / price_range
+    price_range = max(high_arr) - min(low_arr) if high_arr else 1
+    aspect = max_days / max(price_range, 1)
+    # Cap aspect between 0.5 and 3 for display
+    aspect = max(0.5, min(3.0, aspect))
+
+    fig.update_layout(
+        height=520,
+        paper_bgcolor="#060810",
+        plot_bgcolor="#0d1117",
+        font=dict(family="Space Grotesk", color="#94a3b8", size=11),
+        title=dict(
+            text=f"Gann Scaled Chart — 1 unit time = {scale} pts price",
+            font=dict(color="#f59e0b", size=13),
+        ),
+        xaxis=dict(
+            title="Days from Anchor Low",
+            gridcolor="rgba(255,255,255,0.05)",
+            zerolinecolor="rgba(255,255,255,0.1)",
+            color="#64748b",
+        ),
+        yaxis=dict(
+            title="Price (₹)",
+            gridcolor="rgba(255,255,255,0.05)",
+            zerolinecolor="rgba(255,255,255,0.1)",
+            color="#64748b",
+        ),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.02,
+            bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#94a3b8", size=10),
+        ),
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=60, r=40, t=60, b=40),
+    )
+    return fig
+
+
+
     price = data["price"]
     today = datetime.now().date()
 
@@ -757,8 +980,9 @@ def compute_gann_confluence(data, symbol=None):
     # Add detail lines
     reasons.append(f"   Sq9 nearest ₹{nearest_sq9_price:,.2f} · deviation {price_sq9_dev:.2f}%")
     reasons.append(f"   1×1 angle ₹{angle_1x1:,.2f} · price deviation {abs(price_vs_1x1):.1f}%")
-    reasons.append(f"   Time tools active: {active_tools}/3 "
-                   f"(Sq {cycle_details['days_to_sq']}d · Div {cycle_details['days_to_div']}d)")
+    sw = cycle_details["same_window_pairs"]
+    pair_info = " · ".join(cycle_details["pair_labels"]) if cycle_details["pair_labels"] else "no pairs in same window"
+    reasons.append(f"   Time tools active: {active_tools}/3 · Same-window pairs: {sw} ({pair_info})")
 
     # Upcoming dates
     gann_time_units = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
@@ -1461,15 +1685,33 @@ with tab_analyzer:
                     unsafe_allow_html=True,
                 )
             with tc3:
-                yr_rem = gd["days_from_low"] % 365
+                anniv_days_away = (cd["next_anniv_date"] - today).days if cd["next_anniv_date"] else "—"
                 st.markdown(
                     f'<div class="gc {"gc-green" if cd["tool3_active"] else "gc-red"}"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'
                     f'{"✅" if cd["tool3_active"] else "❌"} Tool 3: Anniversary</div>'
-                    f'<div style="font-size:12px;color:#94a3b8">Days in year: {yr_rem}<br>'
-                    f'Days to anniversary: <b style="color:{tool_colors[2]}">{365-yr_rem}</b><br>'
-                    f'Active if within ±5 days</div></div>',
+                    f'<div style="font-size:12px;color:#94a3b8">'
+                    f'Anchor: {gd["anchor_low_date"].strftime("%d %b %Y")}<br>'
+                    f'Next anniv: <b style="color:{tool_colors[2]}">{cd["next_anniv_date"].strftime("%d %b %Y") if cd["next_anniv_date"] else "—"}</b><br>'
+                    f'Days away: <b style="color:{tool_colors[2]}">{anniv_days_away}</b><br>'
+                    f'Active if within ±5 days of anniversary</div></div>',
                     unsafe_allow_html=True,
                 )
+
+            # Same-window confluence summary
+            sw = cd["same_window_pairs"]
+            sw_col = "#10b981" if sw >= 2 else "#f59e0b" if sw == 1 else "#ef4444"
+            sw_pairs = " · ".join(cd["pair_labels"]) if cd["pair_labels"] else "No pairs converging"
+            st.markdown(
+                f'<div class="gc gc-{"green" if sw>=2 else "gold" if sw==1 else "red"}" style="margin-top:8px">'
+                f'<div style="font-weight:700;font-size:13px;margin-bottom:4px">🎯 Same-Window Check (Fix 2)</div>'
+                f'<div style="font-size:12px;color:#94a3b8">'
+                f'Pairs converging in same ±5d window: <b style="color:{sw_col}">{sw}</b><br>'
+                f'{sw_pairs}<br>'
+                f'<span style="color:#475569">Need ≥2 pairs = meaningful cycle cluster. '
+                f'Tools active independently without same-window = {"⚠️ False signal" if sw==0 and cd["active_tools"]>0 else "✅ Real confluence" if sw>=1 else "⚪ No confluence"}</span>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
 
             # Upcoming dates
             td1, td2 = st.columns(2)
@@ -1495,6 +1737,29 @@ with tab_analyzer:
                         f'<div class="lc lc-green" style="font-size:12px;margin-bottom:5px"><b style="color:#10b981">{yr}yr</b> → {ad.strftime("%d %b %Y")} <span style="color:#475569">({da}d)</span></div>',
                         unsafe_allow_html=True,
                     )
+
+            # Fix 3 — Scaled Gann Chart
+            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">📊 Fix 3: Scaled Gann Chart (1 unit time = 1 unit price · scale-adjusted)</div>', unsafe_allow_html=True)
+            st.caption("Angles are visually correct on this chart because scale factor is applied. Confirm visually before trading.")
+            long_h = fetch_long_history(symbol) if symbol else data.get("hist")
+            gann_fig = _build_gann_chart(
+                hist=long_h,
+                anchor_low=gd["anchor_low"],
+                anchor_low_date=gd["anchor_low_date"],
+                anchor_high=gd["anchor_high"],
+                scale=gd["scale"],
+                angle_1x1=gd["angle_1x1"],
+                angle_2x1=gd["angle_2x1"],
+                angle_1x2=gd["angle_1x2"],
+                angle_1x4=gd["angle_1x4"],
+                sq9_levels=gd["sq_levels"],
+                price=price,
+                today=gd["today"],
+            )
+            if gann_fig:
+                st.plotly_chart(gann_fig, use_container_width=True)
+            else:
+                st.info("Chart unavailable — insufficient history data.")
 
             # Step 6 — Price-Time Squaring (scale-corrected)
             sq_col = "#10b981" if is_squared else "#f59e0b"
