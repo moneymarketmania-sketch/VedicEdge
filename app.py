@@ -484,92 +484,284 @@ def compute_tech_score(data, tech):
     return ts, bull, bear
 
 
-# ====================== GANN =================================================
-def compute_gann_confluence(data):
+# ====================== GANN (UPGRADED) ======================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_long_history(symbol):
+    """Fetch max available history (10Y) for proper Gann anchor detection."""
+    try:
+        tk = yf.Ticker(f"{symbol}.NS")
+        h = tk.history(period="10y")
+        if h.empty:
+            h = tk.history(period="5y")
+        if not h.empty:
+            h.index = h.index.tz_localize(None) if h.index.tzinfo is None else h.index.tz_convert(None)
+        return h if not h.empty else None
+    except Exception:
+        return None
+
+
+def _find_significant_anchor(hist):
+    """
+    Find the most significant swing low from full history.
+    Significance = lowest price with highest subsequent move.
+    Returns (anchor_low_price, anchor_low_date, anchor_high_price, anchor_high_date).
+    """
+    if hist is None or len(hist) < 50:
+        return None
+
+    # Rolling 20-bar local minima
+    candidates = []
+    win = 20
+    for i in range(win, len(hist) - win):
+        bar_low = float(hist["Low"].iloc[i])
+        window_min = float(hist["Low"].iloc[i-win:i+win].min())
+        if bar_low == window_min:
+            # Volume on that bar — higher vol = more significant
+            vol = float(hist["Volume"].iloc[i])
+            # Subsequent move from this low to the highest close afterward
+            subsequent_high = float(hist["High"].iloc[i:].max())
+            move_pct = (subsequent_high - bar_low) / max(bar_low, 1) * 100
+            candidates.append((move_pct, vol, bar_low, hist.index[i]))
+
+    if not candidates:
+        # Fallback: absolute low of full history
+        idx = hist["Low"].idxmin()
+        return (
+            round(float(hist["Low"].min()), 2),
+            idx.date(),
+            round(float(hist["High"].max()), 2),
+            hist["High"].idxmax().date(),
+        )
+
+    # Sort by subsequent move % descending — the low that led to the biggest rally
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    _, _, best_low, best_date = candidates[0]
+
+    # Anchor high = highest point AFTER the anchor low
+    after = hist[hist.index >= best_date]
+    anchor_high = round(float(after["High"].max()), 2)
+    anchor_high_date = after["High"].idxmax().date()
+
+    return (
+        round(best_low, 2),
+        best_date.date() if hasattr(best_date, "date") else best_date,
+        anchor_high,
+        anchor_high_date,
+    )
+
+
+def _sq9_levels(price):
+    """
+    Full 8-spoke Square of Nine levels around current price.
+    Cardinals: 0°/90°/180°/270° → integer rings
+    Diagonals: 45°/135°/225°/315° → half-step rings
+    Returns sorted list of (label, price, spoke_type)
+    """
+    root = math.sqrt(price)
+    levels = []
+    for offset in [-2, -1.5, -1, -0.5, 0.5, 1, 1.5, 2, 2.5, 3]:
+        new_root = root + offset
+        if new_root <= 0:
+            continue
+        lv_price = round(new_root ** 2, 2)
+        spoke = "Cardinal" if offset == round(offset) else "Diagonal"
+        direction = "Support" if offset < 0 else "Resistance"
+        step_label = f"{'+' if offset > 0 else ''}{offset}"
+        levels.append((f"{direction} ({step_label} {spoke})", lv_price, spoke))
+    return sorted(levels, key=lambda x: x[1])
+
+
+def _time_cycle_confluence(anchor_low_date, today):
+    """
+    Three independent time tools. Returns (confluence_count, details).
+    All three must independently point to the same ±5-day window for HIGH.
+    Any two = MODERATE.
+    """
+    days_from_low = (today - anchor_low_date).days
+
+    # Tool 1: Natural squares — days that are perfect squares
+    n = int(math.sqrt(days_from_low))
+    sq_prev = n * n
+    sq_next = (n + 1) * (n + 1)
+    days_to_sq = sq_next - days_from_low
+    tool1_active = days_to_sq <= 5 or (days_from_low - sq_prev) <= 5
+
+    # Tool 2: Gann natural divisions (multiples of 90, 144, 180, 360)
+    gann_divs = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
+    tool2_active = any(abs(days_from_low - d) <= 5 for d in gann_divs)
+    nearest_div = min(gann_divs, key=lambda d: abs(days_from_low - d))
+    days_to_div = nearest_div - days_from_low
+
+    # Tool 3: Anniversary dates (yearly + Fibonacci years)
+    fib_days = [days_from_low % 365]  # distance within current year cycle
+    tool3_active = any(abs(r) <= 5 for r in fib_days)
+
+    # Next upcoming events for each tool
+    next_sq_date   = anchor_low_date + timedelta(days=sq_next)
+    next_div_date  = anchor_low_date + timedelta(days=nearest_div) if days_to_div > 0 else anchor_low_date + timedelta(days=nearest_div + 90)
+
+    active_tools = sum([tool1_active, tool2_active, tool3_active])
+
+    details = {
+        "tool1_active": tool1_active,
+        "tool2_active": tool2_active,
+        "tool3_active": tool3_active,
+        "active_tools": active_tools,
+        "days_to_sq": days_to_sq,
+        "sq_prev": sq_prev, "sq_next": sq_next,
+        "nearest_div": nearest_div, "days_to_div": days_to_div,
+        "next_sq_date": next_sq_date,
+        "next_div_date": next_div_date,
+        "days_from_low": days_from_low,
+    }
+    return active_tools, details
+
+
+def compute_gann_confluence(data, symbol=None):
     price = data["price"]
     today = datetime.now().date()
-    if data.get("hist") is not None:
-        hist = data["hist"]
-        anchor_low  = round(float(hist["Low"].min()), 2)
-        anchor_high = round(float(hist["High"].max()), 2)
-        # ── BUG FIX: handle both tz-aware and naive index ──
-        low_idx  = hist["Low"].idxmin()
-        high_idx = hist["High"].idxmax()
-        anchor_low_date  = low_idx.date()  if hasattr(low_idx,  "date") else low_idx.to_pydatetime().date()
-        anchor_high_date = high_idx.date() if hasattr(high_idx, "date") else high_idx.to_pydatetime().date()
-        days_from_low  = (today - anchor_low_date).days
-        days_from_high = (today - anchor_high_date).days
+
+    # ── UPGRADE 1: Use long history for proper anchor ──────────────────────
+    long_hist = None
+    if symbol:
+        long_hist = fetch_long_history(symbol)
+
+    hist = long_hist if (long_hist is not None and not long_hist.empty) else data.get("hist")
+
+    if hist is not None and len(hist) >= 50:
+        anchor_result = _find_significant_anchor(hist)
+        if anchor_result:
+            anchor_low, anchor_low_date, anchor_high, anchor_high_date = anchor_result
+        else:
+            anchor_low  = round(float(hist["Low"].min()), 2)
+            anchor_high = round(float(hist["High"].max()), 2)
+            low_idx  = hist["Low"].idxmin()
+            high_idx = hist["High"].idxmax()
+            anchor_low_date  = low_idx.date()  if hasattr(low_idx,  "date") else low_idx.to_pydatetime().date()
+            anchor_high_date = high_idx.date() if hasattr(high_idx, "date") else high_idx.to_pydatetime().date()
         hl_range = round(anchor_high - anchor_low, 2)
     else:
-        anchor_low  = round(price * 0.72, 2)
-        anchor_high = round(price * 1.22, 2)
-        anchor_low_date  = today - timedelta(days=210)
+        anchor_low       = round(price * 0.72, 2)
+        anchor_high      = round(price * 1.22, 2)
+        anchor_low_date  = today - timedelta(days=500)
         anchor_high_date = today - timedelta(days=90)
-        days_from_low  = 210
-        days_from_high = 90
-        hl_range = round(anchor_high - anchor_low, 2)
+        hl_range         = round(anchor_high - anchor_low, 2)
 
-    sqrt_days  = round(math.sqrt(days_from_low), 4)
-    n_low      = round(sqrt_days)
-    nearest_sq = n_low ** 2
-    next_sq    = (n_low + 1) ** 2 if nearest_sq <= days_from_low else nearest_sq
+    days_from_low  = (today - anchor_low_date).days
+    days_from_high = (today - anchor_high_date).days
+
+    # ── UPGRADE 2: Stock-specific scaling factor ───────────────────────────
+    # scale = price_range / time_range of the major move
+    # This makes angles meaningful — 1 unit price = 1 unit time on scaled chart
+    price_range = max(anchor_high - anchor_low, 1.0)
+    time_range  = max(days_from_low, 1)
+    scale       = price_range / time_range   # pts per day at 1×1 on THIS stock
+    scale       = round(scale, 4)
+
+    # ── UPGRADE 3: Calibrated Gann Angles using scale factor ───────────────
+    # angle_NxM = anchor_low + (days * scale * N/M)
+    angle_4x1 = round(anchor_low + days_from_low * scale * 4,   2)
+    angle_2x1 = round(anchor_low + days_from_low * scale * 2,   2)
+    angle_1x1 = round(anchor_low + days_from_low * scale * 1,   2)
+    angle_1x2 = round(anchor_low + days_from_low * scale * 0.5, 2)
+    angle_1x4 = round(anchor_low + days_from_low * scale * 0.25,2)
+
+    # Current angle — which scaled angle is price closest to?
+    angles = {"4×1": angle_4x1, "2×1": angle_2x1, "1×1": angle_1x1,
+              "1×2": angle_1x2, "1×4": angle_1x4}
+    closest_angle = min(angles, key=lambda k: abs(angles[k] - price))
+    price_vs_1x1  = (price - angle_1x1) / max(angle_1x1, 1) * 100
+
+    if price >= angle_2x1:
+        angle_label = "Above 2×1 (Very Strong Bull)"; angle_color = "#10b981"
+    elif price >= angle_1x1:
+        angle_label = "1×1–2×1 (Bull Zone)";          angle_color = "#10b981"
+    elif price >= angle_1x2:
+        angle_label = "1×2–1×1 (Weak / Caution)";     angle_color = "#f59e0b"
+    else:
+        angle_label = "Below 1×2 (Bear)";              angle_color = "#ef4444"
+
+    # ── UPGRADE 4: Full 8-spoke Square of Nine levels ─────────────────────
+    sq9_all = _sq9_levels(price)
+    # Nearest support and resistance from the 8-spoke wheel
+    sq9_supports    = [(l, p2, s) for l, p2, s in sq9_all if p2 < price]
+    sq9_resistances = [(l, p2, s) for l, p2, s in sq9_all if p2 > price]
+    sq9_s1  = sq9_supports[-1]    if sq9_supports    else ("—", price, "—")
+    sq9_s2  = sq9_supports[-2]    if len(sq9_supports) >= 2    else sq9_s1
+    sq9_r1  = sq9_resistances[0]  if sq9_resistances  else ("—", price, "—")
+    sq9_r2  = sq9_resistances[1]  if len(sq9_resistances) >= 2 else sq9_r1
+
+    # Targets and stop using scaled sq9
+    gann_t1 = sq9_r1[1]
+    gann_t2 = sq9_r2[1]
+    gann_sl = sq9_s2[1]
+
+    # Build display table from 8-spoke levels
+    sq_levels = []
+    for lbl, lv, spoke in sq9_all:
+        marker = "⚪ Current" if lv == price else ("🔴" if "Support" in lbl else "🟢")
+        sq_levels.append([f"{marker} {lbl}", lv, spoke])
+    # Always insert current price row
+    sq_levels_display = [["⚪ Current", price, "—"]] + \
+                        [[f"🔴 {l}", p2, s] for l, p2, s in sq9_supports[-3:]] + \
+                        [[f"🟢 {l}", p2, s] for l, p2, s in sq9_resistances[:3]]
+    sq_levels_display = sorted(sq_levels_display, key=lambda x: x[1])
+
+    # ── UPGRADE 5: Three-tool time cycle confluence ────────────────────────
+    active_tools, cycle_details = _time_cycle_confluence(anchor_low_date, today)
+    sqrt_days    = round(math.sqrt(days_from_low), 4)
+    n_low        = int(sqrt_days)
+    nearest_sq   = n_low * n_low
+    next_sq      = (n_low + 1) * (n_low + 1)
     days_to_next = next_sq - days_from_low
 
-    floor_root = math.floor(math.sqrt(price))
-    ceil_root  = math.ceil(math.sqrt(price))
-    angle_1x1  = round(anchor_low + days_from_low, 2)
-    current_rate = (price - anchor_low) / max(days_from_low, 1)
+    # ── UPGRADE 6: Strict confluence scoring ──────────────────────────────
+    # Price confluence: how close is price to a Sq9 level? (±0.5% = tight)
+    nearest_sq9_price = min([p2 for _, p2, _ in sq9_all], key=lambda x: abs(x - price))
+    price_sq9_dev     = abs(nearest_sq9_price - price) / price * 100
+    at_sq9_tight      = price_sq9_dev <= 0.5
+    at_sq9_moderate   = price_sq9_dev <= 1.5
 
-    if current_rate >= 3.5:
-        angle_label = "4×1 (Very Strong Bull)"; angle_color = "#ef4444"
-    elif current_rate >= 1.8:
-        angle_label = "2×1 (Strong Bull)";      angle_color = "#10b981"
-    elif current_rate >= 0.8:
-        angle_label = "1×1 (Balanced/Healthy)"; angle_color = "#10b981"
-    elif current_rate >= 0.4:
-        angle_label = "1×2 (Weak — Caution)";   angle_color = "#f59e0b"
-    else:
-        angle_label = "Below 1×2 (Bear)";       angle_color = "#ef4444"
+    # Angle confluence: is price within 1% of 1×1 angle?
+    at_1x1 = abs(price - angle_1x1) / max(price, 1) * 100 <= 1.0
 
-    time_sq_of_price = round(math.sqrt(price), 2)
-    squaring_pct = round(abs(time_sq_of_price - days_from_low) / max(days_from_low, 1) * 100, 1)
-    is_squared   = squaring_pct < 5
+    # Time confluence: 2 of 3 tools active = moderate, all 3 = strong
+    time_strong   = active_tools >= 3
+    time_moderate = active_tools >= 2
 
+    # Final confluence — strict hierarchy
     confluence = 0
-    reasons = []
-    if is_squared:
-        confluence += 1; reasons.append(f"✅ Price-Time Squared ({squaring_pct}% dev)")
-    if days_to_next <= 7:
-        confluence += 1; reasons.append(f"✅ Perfect Square in {days_to_next} days")
-    if abs(price - angle_1x1) / price < 0.05:
-        confluence += 1; reasons.append("✅ Near 1×1 Master Angle (±5%)")
-    if abs(price - round(ceil_root**2, 2)) / price < 0.03:
-        confluence += 1; reasons.append("✅ Near Cardinal Sq9 level (±3%)")
-    if abs(days_from_low % 90) <= 5 or days_from_low in [144, 180, 270, 360]:
-        confluence += 1; reasons.append(f"✅ At major time division ({days_from_low} days)")
-    if not reasons:
-        reasons.append("⚪ No major confluence — wait for cycle maturity")
+    reasons    = []
 
-    anchor_sq9_root  = round(math.sqrt(anchor_low), 4)
-    range_sqrt       = round(math.sqrt(hl_range), 4)
-    range_sq_target  = round((math.ceil(range_sqrt) + 1) ** 2, 2)
-    gann_t1 = round((ceil_root + 1) ** 2, 2)
-    gann_t2 = round((ceil_root + 2) ** 2, 2)
-    gann_sl = round((floor_root - 1) ** 2, 2)
+    # Tier 1 — strongest: all three align (price at sq9 tight + angle + time strong)
+    if at_sq9_tight and at_1x1 and time_strong:
+        confluence = 5
+        reasons.append("🔥 TIER 1: Sq9 tight (±0.5%) + 1×1 angle + 3/3 time tools")
+    # Tier 2 — two of three
+    elif (at_sq9_tight or at_sq9_moderate) and time_strong:
+        confluence = 4
+        reasons.append("✅ TIER 2: Sq9 level + strong time cycle (3 tools)")
+    elif at_sq9_tight and (at_1x1 or time_moderate):
+        confluence = 4
+        reasons.append("✅ TIER 2: Sq9 tight + angle/time confluence")
+    elif at_sq9_moderate and time_moderate:
+        confluence = 3
+        reasons.append("✅ TIER 3: Sq9 moderate (±1.5%) + 2/3 time tools")
+    elif at_sq9_moderate or time_moderate or at_1x1:
+        confluence = 2
+        reasons.append("⚡ TIER 4: Single confluence — wait for more alignment")
+    else:
+        confluence = 1
+        reasons.append("⚪ No meaningful confluence — price between levels, time between cycles")
 
-    sq_levels = [
-        ["🔴 Support S2", round((floor_root - 1)**2, 2),       "Cardinal ring below — stop-loss zone"],
-        ["🟠 Support S1", round((math.sqrt(price) - 0.5)**2, 2),"Diagonal Sq9 — minor support"],
-        ["⚪ Current",    price,                                  "Price now"],
-        ["🟡 R1",         round((math.sqrt(price) + 0.5)**2, 2),"Diagonal — first resistance"],
-        ["🟢 R2",         round(ceil_root**2, 2),                "Cardinal ring — immediate resistance"],
-        ["🔵 Target T1",  gann_t1,                               "Primary swing target"],
-        ["🔵 Target T2",  gann_t2,                               "Medium-term target"],
-        ["🔵 Target T3",  round((ceil_root + 3)**2, 2),          "Positional/yearly target"],
-    ]
+    # Add detail lines
+    reasons.append(f"   Sq9 nearest ₹{nearest_sq9_price:,.2f} · deviation {price_sq9_dev:.2f}%")
+    reasons.append(f"   1×1 angle ₹{angle_1x1:,.2f} · price deviation {abs(price_vs_1x1):.1f}%")
+    reasons.append(f"   Time tools active: {active_tools}/3 "
+                   f"(Sq {cycle_details['days_to_sq']}d · Div {cycle_details['days_to_div']}d)")
 
-    gann_time_units = [7, 9, 13, 21, 30, 45, 60, 90, 120, 144, 180, 270, 360]
-    active_cycle = next((t for t in gann_time_units if days_from_low <= t), 360)
+    # Upcoming dates
+    gann_time_units = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
     gann_future = []
     for t in gann_time_units:
         fd = anchor_low_date + timedelta(days=t)
@@ -577,6 +769,7 @@ def compute_gann_confluence(data):
             gann_future.append((t, fd, (fd - today).days))
         if len(gann_future) >= 6:
             break
+
     sq_dates = []
     n_start = int(math.sqrt(days_from_low)) + 1
     for i in range(n_start, n_start + 6):
@@ -584,8 +777,9 @@ def compute_gann_confluence(data):
         sd = anchor_low_date + timedelta(days=d)
         if sd >= today:
             sq_dates.append((d, sd, (sd - today).days, i))
+
     anniv_dates = []
-    for yr in [1, 2, 5, 7, 10]:
+    for yr in [1, 2, 3, 5, 7, 10]:
         try:
             ad = anchor_low_date.replace(year=anchor_low_date.year + yr)
             if ad >= today:
@@ -593,28 +787,52 @@ def compute_gann_confluence(data):
         except Exception:
             pass
 
+    # Price-time squaring using scale factor
+    scaled_time     = days_from_low * scale
+    squaring_pct    = round(abs(price - scaled_time) / max(price, 1) * 100, 1)
+    is_squared      = squaring_pct < 3.0   # tighter threshold with proper scaling
+
+    anchor_sq9_root = round(math.sqrt(anchor_low), 4)
+    range_sqrt      = round(math.sqrt(hl_range), 4)
+    range_sq_target = round((math.ceil(range_sqrt) + 1) ** 2, 2)
+    active_cycle    = next((t for t in gann_time_units if days_from_low <= t), 720)
+
     return (
         confluence, angle_label, angle_color, is_squared, squaring_pct,
         dict(
+            # Anchor
             anchor_low=anchor_low, anchor_high=anchor_high,
             anchor_low_date=anchor_low_date, anchor_high_date=anchor_high_date,
             days_from_low=days_from_low, days_from_high=days_from_high,
-            hl_range=hl_range, sqrt_days=sqrt_days, n_low=n_low,
-            nearest_sq=nearest_sq, next_sq=next_sq, days_to_next=days_to_next,
-            angle_1x1=round(anchor_low + days_from_low, 2),
-            angle_2x1=round(anchor_low + days_from_low * 2, 2),
-            angle_1x2=round(anchor_low + days_from_low * 0.5, 2),
-            angle_4x1=round(anchor_low + days_from_low * 4, 2),
-            current_rate=current_rate,
-            anchor_sq9_root=anchor_sq9_root, time_sq_of_price=time_sq_of_price,
-            is_squared=is_squared, squaring_pct=squaring_pct,
-            confluence=confluence, reasons=reasons,
-            floor_root=floor_root, ceil_root=ceil_root,
-            sq_levels=sq_levels, sq9_root=round(math.sqrt(price), 4),
-            range_sqrt=range_sqrt, range_sq_target=range_sq_target,
+            hl_range=hl_range,
+            # Scale
+            scale=scale,
+            # Angles (calibrated)
+            angle_4x1=angle_4x1, angle_2x1=angle_2x1, angle_1x1=angle_1x1,
+            angle_1x2=angle_1x2, angle_1x4=angle_1x4,
+            closest_angle=closest_angle, price_vs_1x1=round(price_vs_1x1, 1),
+            # Sq9
+            sq9_root=round(math.sqrt(price), 4),
+            sq9_s1=sq9_s1, sq9_s2=sq9_s2, sq9_r1=sq9_r1, sq9_r2=sq9_r2,
+            nearest_sq9_price=nearest_sq9_price, price_sq9_dev=price_sq9_dev,
+            sq_levels=sq_levels_display,
+            # Targets / SL
             gann_t1=gann_t1, gann_t2=gann_t2, gann_sl=gann_sl,
-            active_cycle=active_cycle, gann_future=gann_future,
-            sq_dates=sq_dates, anniv_dates=anniv_dates, today=today,
+            # Time
+            sqrt_days=sqrt_days, n_low=n_low,
+            nearest_sq=nearest_sq, next_sq=next_sq, days_to_next=days_to_next,
+            cycle_details=cycle_details, active_tools=active_tools,
+            gann_future=gann_future, sq_dates=sq_dates, anniv_dates=anniv_dates,
+            active_cycle=active_cycle,
+            # Squaring
+            scaled_time=round(scaled_time, 2),
+            is_squared=is_squared, squaring_pct=squaring_pct,
+            # Range
+            anchor_sq9_root=anchor_sq9_root,
+            range_sqrt=range_sqrt, range_sq_target=range_sq_target,
+            # Confluence
+            confluence=confluence, reasons=reasons,
+            today=today,
         ),
     )
 
@@ -964,7 +1182,7 @@ with tab_analyzer:
         data = fetch_stock_data(symbol)
 
         tech = compute_technicals(data)
-        gann_conf, angle_label, angle_color, is_squared, squaring_pct, gd = compute_gann_confluence(data)
+        gann_conf, angle_label, angle_color, is_squared, squaring_pct, gd = compute_gann_confluence(data, symbol)
         tech_score, bull_pts, bear_pts = compute_tech_score(data, tech)
         cv_final, cv_lbl, cv_cls, cv_icon, tech_norm, gann_norm = combined_verdict(tech_score, gann_conf)
 
@@ -1140,61 +1358,125 @@ with tab_analyzer:
         # ── GANN TAB ─────────────────────────────────────────────────────────
         with gann_tab:
             price = data["price"]
-            gk1, gk2, gk3, gk4, gk5 = st.columns(5)
+            cd    = gd["cycle_details"]
+
+            # KPIs
+            gk1, gk2, gk3, gk4, gk5, gk6 = st.columns(6)
             for col, (lbl, val, clr) in zip(
-                [gk1, gk2, gk3, gk4, gk5],
-                [("Price", f"₹{price:,.2f}", "#f59e0b"),
-                 ("Sq9 Root", str(gd["sq9_root"]), "#8b5cf6"),
+                [gk1, gk2, gk3, gk4, gk5, gk6],
+                [("Price",      f"₹{price:,.2f}",           "#f59e0b"),
+                 ("Sq9 Root",   str(gd["sq9_root"]),         "#8b5cf6"),
                  ("Anchor Low", f"₹{gd['anchor_low']:,.2f}", "#3b82f6"),
-                 ("Days Low", str(gd["days_from_low"]), "#f59e0b"),
-                 ("√Days", str(gd["sqrt_days"]), "#10b981")],
+                 ("Days",       str(gd["days_from_low"]),    "#f59e0b"),
+                 ("Scale",      str(gd["scale"]),            "#10b981"),
+                 ("Time Tools", f"{gd['active_tools']}/3",   "#10b981" if gd["active_tools"]>=2 else "#ef4444")],
             ):
                 with col:
                     st.markdown(kpi(lbl, val, clr), unsafe_allow_html=True)
 
+            # Step 1 — Anchor
             gs1, gs2 = st.columns(2)
             with gs1:
                 st.markdown(
-                    f"""<div class="gc gc-blue"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">📌 Step 1: Anchors</div>
+                    f"""<div class="gc gc-blue"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">📌 Step 1: Significant Anchor (Multi-Year)</div>
                     <div style="font-size:13px;color:#94a3b8;line-height:2">
-                    🔽 Swing Low: <b style="color:#3b82f6">₹{gd['anchor_low']:,.2f}</b> · {gd['anchor_low_date'].strftime('%d %b %Y')}<br>
-                    🔼 Swing High: <b style="color:#ef4444">₹{gd['anchor_high']:,.2f}</b> · {gd['anchor_high_date'].strftime('%d %b %Y')}<br>
-                    HL Range: <b style="color:#e8edf5">₹{gd['hl_range']:,.2f}</b> · √Range: <b style="color:#e8edf5">{gd['range_sqrt']}</b><br>
-                    Range Sq Target: <b style="color:#10b981">₹{gd['range_sq_target']:,.2f}</b>
+                    🔽 Anchor Low: <b style="color:#3b82f6">₹{gd['anchor_low']:,.2f}</b> · {gd['anchor_low_date'].strftime('%d %b %Y')}<br>
+                    🔼 Anchor High: <b style="color:#ef4444">₹{gd['anchor_high']:,.2f}</b> · {gd['anchor_high_date'].strftime('%d %b %Y')}<br>
+                    HL Range: <b style="color:#e8edf5">₹{gd['hl_range']:,.2f}</b> · Days elapsed: <b style="color:#f59e0b">{gd['days_from_low']}</b><br>
+                    <span style="color:#475569;font-size:11px">Anchor = highest-move swing low from max available history</span>
                     </div></div>""",
                     unsafe_allow_html=True,
                 )
             with gs2:
                 st.markdown(
-                    f"""<div class="gc gc-gold"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">⏰ Step 2: Time Elapsed</div>
+                    f"""<div class="gc gc-gold"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">📐 Step 2: Scaling Factor</div>
                     <div style="font-size:13px;color:#94a3b8;line-height:2">
-                    Days from Low: <b style="color:#f59e0b;font-size:18px">{gd['days_from_low']}</b><br>
-                    √{gd['days_from_low']} = <b style="color:#10b981">{gd['sqrt_days']}</b><br>
-                    Next perfect square: <b style="color:#f59e0b">{gd['next_sq']} days</b> → {(gd['anchor_low_date']+timedelta(days=gd['next_sq'])).strftime('%d %b %Y')} ({gd['days_to_next']} days away)
+                    Price Range: <b style="color:#e8edf5">₹{gd['hl_range']:,.2f}</b><br>
+                    Time Range: <b style="color:#e8edf5">{gd['days_from_low']} days</b><br>
+                    Scale (pts/day): <b style="color:#10b981;font-size:16px">{gd['scale']}</b><br>
+                    <span style="color:#475569;font-size:11px">All angles calculated using this stock-specific scale</span>
                     </div></div>""",
                     unsafe_allow_html=True,
                 )
 
-            n_prev   = int(math.sqrt(gd["days_from_low"]))
-            prev_sq  = n_prev ** 2
-            pct_thru = round((gd["days_from_low"] - prev_sq) / max(gd["next_sq"] - prev_sq, 1) * 100, 1)
-            sq3c     = "#10b981" if gd["days_to_next"] <= 5 else "#f59e0b" if gd["days_to_next"] <= 15 else "#64748b"
+            # Step 3 — Calibrated Angles
+            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">📐 Step 3: Calibrated Gann Angles (Scale-Adjusted)</div>', unsafe_allow_html=True)
+            ga1, ga2 = st.columns([2, 1])
+            with ga1:
+                st.dataframe(
+                    pd.DataFrame([
+                        ["4×1", f"₹{gd['angle_4x1']:,.2f}", f"4× scale ({round(gd['scale']*4,3)} pts/day)", "Very strong bull" if price >= gd["angle_4x1"] else "Above price"],
+                        ["2×1", f"₹{gd['angle_2x1']:,.2f}", f"2× scale ({round(gd['scale']*2,3)} pts/day)", "Strong bull" if price >= gd["angle_2x1"] else "Above price"],
+                        ["1×1 ★", f"₹{gd['angle_1x1']:,.2f}", f"1× scale ({gd['scale']} pts/day) — Master", f"Price {gd['price_vs_1x1']:+.1f}% from 1×1"],
+                        ["1×2", f"₹{gd['angle_1x2']:,.2f}", f"0.5× scale — Caution zone", "Bear" if price <= gd["angle_1x2"] else "Above bear line"],
+                        ["1×4", f"₹{gd['angle_1x4']:,.2f}", f"0.25× scale — Bear", "Strong bear" if price <= gd["angle_1x4"] else "Above bear line"],
+                    ], columns=["Angle", "Level (₹)", "Scale Rate", "Status"]),
+                    use_container_width=True, hide_index=True,
+                )
+            with ga2:
+                st.markdown(
+                    f'<div class="gc gc-gold" style="text-align:center"><div class="kpi-label">Current Zone</div>'
+                    f'<div style="font-size:13px;font-weight:800;color:{angle_color};margin:8px 0;line-height:1.4">{angle_label}</div>'
+                    f'<div style="color:#475569;font-size:12px">Closest: {gd["closest_angle"]}<br>'
+                    f'1×1 deviation: {gd["price_vs_1x1"]:+.1f}%</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Step 4 — Full 8-Spoke Square of Nine
+            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">🌀 Step 4: Square of Nine — Full 8-Spoke Wheel</div>', unsafe_allow_html=True)
+            sq_col = "#10b981" if gd["price_sq9_dev"] <= 0.5 else "#f59e0b" if gd["price_sq9_dev"] <= 1.5 else "#64748b"
             st.markdown(
-                f"""<div class="gc gc-purple"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">🔢 Step 3: Square of Time</div>
-                <div style="font-size:13px;color:#94a3b8;line-height:2">
-                Previous: <b style="color:#e8edf5">{n_prev}²={prev_sq} days</b> · Current: <b style="color:{sq3c}">{pct_thru}% through window</b><br>
-                Next: <b style="color:{sq3c}">{int(math.sqrt(gd['next_sq']))}²={gd['next_sq']} days</b> → {(gd['anchor_low_date']+timedelta(days=gd['next_sq'])).strftime('%d %b %Y')} ({gd['days_to_next']} days)
-                <br><span style="color:#f59e0b">{"⚡ APPROACHING perfect square!" if gd['days_to_next']<=7 else "Monitor ±3-7 days around the square date."}</span>
-                </div></div>""",
-                unsafe_allow_html=True,
+                f'<div style="font-size:12px;color:{sq_col};margin-bottom:8px">'
+                f'Nearest Sq9 level: ₹{gd["nearest_sq9_price"]:,.2f} · Deviation: {gd["price_sq9_dev"]:.2f}% '
+                f'{"✅ Tight (≤0.5%)" if gd["price_sq9_dev"]<=0.5 else "⚡ Moderate (≤1.5%)" if gd["price_sq9_dev"]<=1.5 else "⚪ Loose (>1.5%)"}'
+                f'</div>', unsafe_allow_html=True
+            )
+            st.dataframe(
+                pd.DataFrame(gd["sq_levels"], columns=["Level", "Price (₹)", "Spoke Type"]),
+                use_container_width=True, hide_index=True,
             )
 
-            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">⏱️ Step 4: Natural Time Divisions</div>', unsafe_allow_html=True)
+            # Step 5 — Three-Tool Time Cycle
+            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">⏱️ Step 5: Three-Tool Time Cycle Confluence</div>', unsafe_allow_html=True)
+            tc1, tc2, tc3 = st.columns(3)
+            tool_colors = ["#10b981" if cd[f"tool{i}_active"] else "#ef4444" for i in [1,2,3]]
+            with tc1:
+                st.markdown(
+                    f'<div class="gc {"gc-green" if cd["tool1_active"] else "gc-red"}"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'
+                    f'{"✅" if cd["tool1_active"] else "❌"} Tool 1: Perfect Square</div>'
+                    f'<div style="font-size:12px;color:#94a3b8">Days: {cd["days_from_low"]}<br>'
+                    f'Prev sq: {cd["sq_prev"]} · Next sq: {cd["sq_next"]}<br>'
+                    f'Days to next: <b style="color:{tool_colors[0]}">{cd["days_to_sq"]}</b><br>'
+                    f'Next sq date: {cd["next_sq_date"].strftime("%d %b %Y")}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with tc2:
+                st.markdown(
+                    f'<div class="gc {"gc-green" if cd["tool2_active"] else "gc-red"}"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'
+                    f'{"✅" if cd["tool2_active"] else "❌"} Tool 2: Gann Divisions</div>'
+                    f'<div style="font-size:12px;color:#94a3b8">Days: {cd["days_from_low"]}<br>'
+                    f'Nearest div: {cd["nearest_div"]}d<br>'
+                    f'Days away: <b style="color:{tool_colors[1]}">{abs(cd["days_to_div"])}</b><br>'
+                    f'Date: {cd["next_div_date"].strftime("%d %b %Y")}</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with tc3:
+                yr_rem = gd["days_from_low"] % 365
+                st.markdown(
+                    f'<div class="gc {"gc-green" if cd["tool3_active"] else "gc-red"}"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'
+                    f'{"✅" if cd["tool3_active"] else "❌"} Tool 3: Anniversary</div>'
+                    f'<div style="font-size:12px;color:#94a3b8">Days in year: {yr_rem}<br>'
+                    f'Days to anniversary: <b style="color:{tool_colors[2]}">{365-yr_rem}</b><br>'
+                    f'Active if within ±5 days</div></div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Upcoming dates
             td1, td2 = st.columns(2)
             with td1:
-                st.markdown("**Gann Natural Cycles**")
+                st.markdown("**Next Gann Cycle Dates**")
                 for t, fd, da in gd["gann_future"]:
-                    is_maj = t in [45, 90, 180, 360]
+                    is_maj = t in [90, 144, 180, 360, 504, 720]
                     cls    = "lc-gold" if is_maj else "lc-blue"
                     tag    = ' <span style="color:#f59e0b;font-size:10px">★MAJOR</span>' if is_maj else ""
                     st.markdown(
@@ -1214,93 +1496,85 @@ with tab_analyzer:
                         unsafe_allow_html=True,
                     )
 
-            st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">🌀 Step 5: Square of Nine — Price Levels</div>', unsafe_allow_html=True)
-            st.dataframe(
-                pd.DataFrame(gd["sq_levels"], columns=["Level", "Price (₹)", "Note"]),
-                use_container_width=True, hide_index=True,
-            )
-
+            # Step 6 — Price-Time Squaring (scale-corrected)
             sq_col = "#10b981" if is_squared else "#f59e0b"
             st.markdown(
-                f"""<div class="gc {'gc-green' if is_squared else 'gc-gold'}"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">⚖️ Step 6: Price Squared with Time</div>
+                f"""<div class="gc {'gc-green' if is_squared else 'gc-gold'}">
+                <div style="color:#f59e0b;font-weight:700;margin-bottom:6px">⚖️ Step 6: Price Squared with Time (Scale-Corrected)</div>
                 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px">
                 <div style="font-size:13px;color:#94a3b8;line-height:2">
-                P=₹{price:,.2f} · t={gd['days_from_low']}d · √P={gd['time_sq_of_price']}d · Deviation: <b style="color:{sq_col}">{squaring_pct}%</b> {"✅ <5%" if is_squared else "⚠️ >5%"}<br>
-                Anchor √Price: {gd['anchor_sq9_root']} → +2 ring: <b style="color:#10b981">₹{round((gd['anchor_sq9_root']+2)**2,2):,.2f}</b>
+                Price ₹{price:,.2f} · Days {gd['days_from_low']} · Scale {gd['scale']}<br>
+                Scaled time = {gd['days_from_low']} × {gd['scale']} = <b style="color:#f59e0b">₹{gd['scaled_time']:,.2f}</b><br>
+                Deviation from price: <b style="color:{sq_col}">{squaring_pct}%</b> {"✅ Squared (<3%)" if is_squared else "⚠️ Not squared (>3%)"}
                 </div>
-                <div class="verdict-banner {'vb-buy' if is_squared else 'vb-caution'}" style="font-size:13px;padding:10px 16px;margin:0">{"🟢 SQUARED" if is_squared else "🟡 NOT SQUARED"}</div>
+                <div class="verdict-banner {'vb-buy' if is_squared else 'vb-caution'}" style="font-size:13px;padding:10px 16px;margin:0">
+                {"🟢 PRICE = TIME" if is_squared else "🟡 NOT SQUARED"}
+                </div>
                 </div></div>""",
                 unsafe_allow_html=True,
             )
 
-            ga1, ga2 = st.columns([2, 1])
-            with ga1:
-                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">📐 Step 7: Gann Angles</div>', unsafe_allow_html=True)
-                st.dataframe(
-                    pd.DataFrame([
-                        ["4×1", f"₹{gd['angle_4x1']:,.2f}", "4 pts/day"],
-                        ["2×1", f"₹{gd['angle_2x1']:,.2f}", "2 pts/day"],
-                        ["1×1 ★", f"₹{gd['angle_1x1']:,.2f}", "1 pt/day — master angle"],
-                        ["1×2", f"₹{gd['angle_1x2']:,.2f}", "0.5 pts/day — bear zone"],
-                    ], columns=["Angle", "Level", "Meaning"]),
-                    use_container_width=True, hide_index=True,
-                )
-            with ga2:
-                st.markdown(
-                    f'<div class="gc gc-gold" style="text-align:center;margin-top:32px"><div class="kpi-label">Current Angle</div>'
-                    f'<div style="font-size:14px;font-weight:800;color:{angle_color};margin:8px 0">{angle_label}</div>'
-                    f'<div style="color:#475569;font-size:12px">{round(gd["current_rate"],3)} pts/day</div></div>',
-                    unsafe_allow_html=True,
-                )
-
-            hl_r  = gd["hl_range"]
+            # Step 7 — Range Squaring
+            hl_r   = gd["hl_range"]
             r_proj = (gd["anchor_low_date"] + timedelta(days=round(hl_r))).strftime("%d %b %Y")
             st.markdown(
-                f"""<div class="gc gc-cyan"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">📏 Step 8: Range Squaring</div>
+                f"""<div class="gc gc-cyan"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">📏 Step 7: Range Squaring</div>
                 <div style="font-size:13px;color:#94a3b8;line-height:2">
                 HL Range ₹{hl_r:,.2f} · √Range {gd['range_sqrt']} · Time proj: {round(hl_r)}d → {r_proj}<br>
-                Range Sq Target: <b style="color:#10b981;font-size:16px">₹{gd['range_sq_target']:,.2f}</b></div></div>""",
+                Range Sq Target: <b style="color:#10b981;font-size:16px">₹{gd['range_sq_target']:,.2f}</b><br>
+                Anchor √Price: {gd['anchor_sq9_root']} → +2 ring: <b style="color:#10b981">₹{round((gd['anchor_sq9_root']+2)**2,2):,.2f}</b>
+                </div></div>""",
                 unsafe_allow_html=True,
             )
 
+            # Step 8 — Final Confluence Verdict
             cg1, cg2 = st.columns([1, 2])
             with cg1:
-                conf_c = "#10b981" if gann_conf >= 3 else "#f59e0b" if gann_conf >= 2 else "#ef4444"
+                conf_c = "#10b981" if gann_conf >= 4 else "#f59e0b" if gann_conf >= 3 else "#ef4444"
+                tier_lbl = "🔥 TIER 1-2 HIGH" if gann_conf >= 4 else "⚡ TIER 3 MODERATE" if gann_conf >= 3 else "⏳ LOW / WAIT"
                 st.markdown(
-                    f'<div class="gc" style="text-align:center"><div class="kpi-label">🎯 Step 9: Confluence</div>'
+                    f'<div class="gc" style="text-align:center"><div class="kpi-label">🎯 Step 8: Confluence</div>'
                     f'<div style="font-size:64px;font-weight:900;font-family:JetBrains Mono,monospace;color:{conf_c}">{gann_conf}/5</div>'
                     f'{pb(gann_conf,5,conf_c)}'
-                    f'<div style="color:{conf_c};font-weight:700">{"🔥 HIGH PROB" if gann_conf>=3 else "⚡ MODERATE" if gann_conf>=2 else "⏳ LOW"}</div></div>',
+                    f'<div style="color:{conf_c};font-weight:700">{tier_lbl}</div></div>',
                     unsafe_allow_html=True,
                 )
             with cg2:
                 r_html = "".join([
-                    f'<div class="lc lc-{"green" if "✅" in r else "blue"}" style="font-size:12px;margin-bottom:5px">{r}</div>'
+                    f'<div class="lc lc-{"green" if any(x in r for x in ["🔥","✅"]) else "gold" if "⚡" in r else "blue"}" '
+                    f'style="font-size:12px;margin-bottom:5px">{r}</div>'
                     for r in gd["reasons"]
                 ])
                 st.markdown(
-                    f'<div class="gc gc-gold"><div style="color:#f59e0b;font-weight:700;margin-bottom:8px">Active Confluences:</div>{r_html}'
-                    f'<div style="color:#475569;font-size:11px;margin-top:8px">Min 2 confluences + volume + 1:3 R:R before entry.</div></div>',
+                    f'<div class="gc gc-gold"><div style="color:#f59e0b;font-weight:700;margin-bottom:8px">Confluence Breakdown:</div>{r_html}'
+                    f'<div style="color:#475569;font-size:11px;margin-top:8px">'
+                    f'Rule: Only trade Tier 1-2 (score ≥4) + technical confirmation. '
+                    f'Tier 3 = watch only. Tier 4 = wait.</div></div>',
                     unsafe_allow_html=True,
                 )
 
+            # Final verdict
             gv_rr  = round((gd["gann_t1"] - price) / max(price - gd["gann_sl"], 0.01), 2)
-            gv_cls = "vb-buy" if gann_conf >= 3 and gd["current_rate"] >= 0.8 else "vb-caution" if gann_conf >= 2 else "vb-avoid"
-            gv_txt = ("STRONG SETUP" if gann_conf >= 3 and gd["current_rate"] >= 0.8
-                      else "WAIT — MORE CONFLUENCE NEEDED" if gann_conf >= 2
-                      else "AVOID — CYCLES NOT ALIGNED")
+            gv_cls = "vb-buy" if gann_conf >= 4 else "vb-caution" if gann_conf >= 3 else "vb-avoid"
+            gv_txt = ("STRONG GANN SETUP" if gann_conf >= 4
+                      else "WATCH — PARTIAL CONFLUENCE" if gann_conf >= 3
+                      else "WAIT — CYCLES NOT ALIGNED")
             st.markdown(
                 f"""<div class="gc gc-gold"><div class="verdict-banner {gv_cls}" style="margin-bottom:14px">🔶 {gv_txt}</div>
                 <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px">
-                    <div class="lc lc-blue" style="font-size:12px">📍 Anchor Low<br>₹{gd['anchor_low']:,.2f} · {gd['anchor_low_date'].strftime('%d %b %Y')}</div>
-                    <div class="lc lc-gold" style="font-size:12px">📐 Gann Angle<br>{angle_label}</div>
-                    <div class="lc {'lc-green' if is_squared else 'lc-gold'}" style="font-size:12px">⚖️ Price-Time<br>{"✅ Squared" if is_squared else "⚠️ Not Squared"} ({squaring_pct}%)</div>
-                    <div class="lc lc-green" style="font-size:12px">🎯 T1: ₹{gd['gann_t1']:,.2f}</div>
-                    <div class="lc lc-blue"  style="font-size:12px">🎯 T2: ₹{gd['gann_t2']:,.2f}</div>
-                    <div class="lc lc-red"   style="font-size:12px">🛑 SL: ₹{gd['gann_sl']:,.2f}</div>
+                    <div class="lc lc-blue" style="font-size:12px">📍 Anchor<br>₹{gd['anchor_low']:,.2f} · {gd['anchor_low_date'].strftime('%d %b %Y')}</div>
+                    <div class="lc lc-gold" style="font-size:12px">📐 Angle Zone<br>{angle_label}</div>
+                    <div class="lc {'lc-green' if is_squared else 'lc-gold'}" style="font-size:12px">⚖️ P=T<br>{"✅ Squared" if is_squared else f"⚠️ {squaring_pct}% off"}</div>
+                    <div class="lc lc-green" style="font-size:12px">🎯 T1 (Sq9 R1)<br>₹{gd['gann_t1']:,.2f}</div>
+                    <div class="lc lc-blue"  style="font-size:12px">🎯 T2 (Sq9 R2)<br>₹{gd['gann_t2']:,.2f}</div>
+                    <div class="lc lc-red"   style="font-size:12px">🛑 SL (Sq9 S2)<br>₹{gd['gann_sl']:,.2f}</div>
                 </div>
-                <div style="font-size:12px;color:#64748b">R:R 1:{gv_rr} {"✅" if gv_rr>=3 else "⚠️"} · Sq9 {gd['sq9_root']} · Range target ₹{gd['range_sq_target']:,.2f}</div>
-                </div>""",
+                <div style="font-size:12px;color:#64748b">
+                R:R 1:{gv_rr} {"✅" if gv_rr>=2.5 else "⚠️"} · 
+                Sq9 root {gd['sq9_root']} · 
+                Scale {gd['scale']} pts/day · 
+                Range target ₹{gd['range_sq_target']:,.2f}
+                </div></div>""",
                 unsafe_allow_html=True,
             )
 
