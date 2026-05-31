@@ -342,14 +342,68 @@ def compute_technicals(data):
         )
         adx = round(float(dx_series.ewm(alpha=1/14, min_periods=14, adjust=False).mean().iloc[-1]), 1)
 
-        ph = round(float(h["High"].iloc[-2]), 2)
-        pl = round(float(h["Low"].iloc[-2]), 2)
-        pc = round(float(h["Close"].iloc[-2]), 2)
-        pivot = round((ph + pl + pc) / 3, 2)
-        r1 = round(2*pivot - pl, 2)
-        s1 = round(2*pivot - ph, 2)
-        r2 = round(pivot + (ph - pl), 2)
-        s2 = round(pivot - (ph - pl), 2)
+        # ── WEEKLY PIVOT (last completed week) ──────────────────────────────
+        h_copy = h.copy()
+        h_copy.index = pd.to_datetime(h_copy.index)
+        weekly = h_copy.resample("W").agg({"High": "max", "Low": "min", "Close": "last"})
+        weekly = weekly.dropna()
+        # Use second-to-last row = last fully completed week
+        if len(weekly) >= 2:
+            wph = round(float(weekly["High"].iloc[-2]), 2)
+            wpl = round(float(weekly["Low"].iloc[-2]),  2)
+            wpc = round(float(weekly["Close"].iloc[-2]), 2)
+        else:
+            wph, wpl, wpc = round(float(h["High"].iloc[-2]),2), round(float(h["Low"].iloc[-2]),2), round(float(h["Close"].iloc[-2]),2)
+        w_pivot = round((wph + wpl + wpc) / 3, 2)
+        w_r1    = round(2*w_pivot - wpl, 2)
+        w_s1    = round(2*w_pivot - wph, 2)
+        w_r2    = round(w_pivot + (wph - wpl), 2)
+        w_s2    = round(w_pivot - (wph - wpl), 2)
+        # CPR width as % of price (meaningful threshold: <0.5% = narrow, >2% = wide)
+        w_cpr_pct = round((w_r1 - w_s1) / p * 100, 2)
+
+        # ── MONTHLY PIVOT (last completed month) ────────────────────────────
+        monthly = h_copy.resample("ME").agg({"High": "max", "Low": "min", "Close": "last"})
+        monthly = monthly.dropna()
+        if len(monthly) >= 2:
+            mph = round(float(monthly["High"].iloc[-2]), 2)
+            mpl = round(float(monthly["Low"].iloc[-2]),  2)
+            mpc = round(float(monthly["Close"].iloc[-2]), 2)
+        else:
+            mph, mpl, mpc = wph, wpl, wpc
+        m_pivot = round((mph + mpl + mpc) / 3, 2)
+        m_r1    = round(2*m_pivot - mpl, 2)
+        m_s1    = round(2*m_pivot - mph, 2)
+        m_r2    = round(m_pivot + (mph - mpl), 2)
+        m_s2    = round(m_pivot - (mph - mpl), 2)
+        m_cpr_pct = round((m_r1 - m_s1) / p * 100, 2)
+
+        # ── KEY S/R: swing highs/lows + round numbers + 52W ─────────────────
+        # Swing highs: local maxima over rolling 10-bar window
+        swing_highs = []
+        swing_lows  = []
+        roll_win = 10
+        for i in range(roll_win, len(h) - roll_win):
+            if h["High"].iloc[i] == h["High"].iloc[i-roll_win:i+roll_win].max():
+                swing_highs.append(round(float(h["High"].iloc[i]), 2))
+            if h["Low"].iloc[i] == h["Low"].iloc[i-roll_win:i+roll_win].min():
+                swing_lows.append(round(float(h["Low"].iloc[i]), 2))
+        # Keep 3 closest above and below price
+        key_res = sorted([x for x in swing_highs if x > p])[:3]
+        key_sup = sorted([x for x in swing_lows  if x < p], reverse=True)[:3]
+        # Round number levels within ±15% of price
+        mag = 10 ** max(0, int(math.log10(p)) - 1)  # e.g. ₹334 → mag=10, ₹1200 → mag=100
+        rounds = []
+        base = round(p * 0.85 / mag) * mag
+        while base <= p * 1.15:
+            rounds.append(round(base, 2))
+            base += mag
+        # 52W proximity
+        w52h = data["w52h"]
+        w52l = data["w52l"]
+        w52h_prox = round((w52h - p) / p * 100, 1)
+        w52l_prox = round((p - w52l) / p * 100, 1)
+
     else:
         ema9 = ema21 = ema55 = ema200 = p
         macd_val = 0.5; macd_sig = 0.2; macd_hist = 0.3
@@ -357,8 +411,16 @@ def compute_technicals(data):
         stoch_k = 55.0; stoch_d = 52.0
         vol20 = data["volume"]; volr = 1.0
         di_pos = 22.0; di_neg = 18.0; adx = 24.0
-        pivot = p; r1 = round(p*1.02, 2); s1 = round(p*0.98, 2)
-        r2 = round(p*1.04, 2); s2 = round(p*0.96, 2)
+        w_pivot = p; w_r1 = round(p*1.02,2); w_s1 = round(p*0.98,2)
+        w_r2 = round(p*1.04,2); w_s2 = round(p*0.96,2); w_cpr_pct = 2.0
+        m_pivot = p; m_r1 = round(p*1.04,2); m_s1 = round(p*0.96,2)
+        m_r2 = round(p*1.08,2); m_s2 = round(p*0.92,2); m_cpr_pct = 4.0
+        key_res = [round(p*1.03,2), round(p*1.06,2), round(p*1.10,2)]
+        key_sup = [round(p*0.97,2), round(p*0.94,2), round(p*0.90,2)]
+        rounds  = []
+        w52h = data["w52h"]; w52l = data["w52l"]
+        w52h_prox = round((w52h - p) / p * 100, 1)
+        w52l_prox = round((p - w52l) / p * 100, 1)
 
     return dict(
         ema9=ema9, ema21=ema21, ema55=ema55, ema200=ema200,
@@ -367,7 +429,13 @@ def compute_technicals(data):
         stoch_k=stoch_k, stoch_d=stoch_d,
         vol20=vol20, volr=volr,
         di_pos=di_pos, di_neg=di_neg, adx=adx,
-        pivot=pivot, r1=r1, s1=s1, r2=r2, s2=s2,
+        # Weekly pivot
+        w_pivot=w_pivot, w_r1=w_r1, w_s1=w_s1, w_r2=w_r2, w_s2=w_s2, w_cpr_pct=w_cpr_pct,
+        # Monthly pivot
+        m_pivot=m_pivot, m_r1=m_r1, m_s1=m_s1, m_r2=m_r2, m_s2=m_s2, m_cpr_pct=m_cpr_pct,
+        # S/R context
+        key_res=key_res, key_sup=key_sup, rounds=rounds,
+        w52h=w52h, w52l=w52l, w52h_prox=w52h_prox, w52l_prox=w52l_prox,
     )
 
 
@@ -765,22 +833,32 @@ with tab_scanner:
         UNIVERSE = fetch_nifty500_symbols()
     st.caption(f"Universe: {len(UNIVERSE)} symbols loaded")
 
-    with st.expander("⚙️  Filter Settings", expanded=True):
-        fc1, fc2, fc3, fc4 = st.columns(4)
+    with st.expander("⚙️  Scanner Settings", expanded=True):
+        st.markdown(
+            '<div style="font-size:12px;color:#64748b;margin-bottom:12px">'
+            '🚦 <b>Sequential gates</b> — stock must pass ALL active gates. Fail one = out.'
+            '</div>', unsafe_allow_html=True
+        )
+        fc1, fc2, fc3 = st.columns(3)
         with fc1:
-            min_rsi   = st.slider("Min RSI", 20, 60, 35)
-            max_rsi   = st.slider("Max RSI", 50, 85, 68)
+            st.markdown("**Gate 1 — Liquidity (always on)**")
+            min_vol_l = st.number_input("Min avg volume (lakhs/day)", value=5.0, step=0.5)
+            min_price = st.number_input("Min price ₹", value=50)
+            max_price = st.number_input("Max price ₹", value=5000)
         with fc2:
-            min_atr   = st.slider("Min ATR%", 0.5, 5.0, 1.5, 0.1)
-            max_pe    = st.slider("Max PE", 10, 80, 45)
+            st.markdown("**Gate 2 — Trend (always on)**")
+            st.caption("Price > 200 EMA · 50 EMA > 200 EMA · Price > 20 EMA")
+            st.markdown("**Gate 3 — Momentum**")
+            min_rsi = st.slider("RSI min", 20, 55, 45)
+            max_rsi = st.slider("RSI max", 55, 80, 65)
+            f_macd_fresh = st.checkbox("MACD hist turned positive (fresh crossover)", value=True)
         with fc3:
-            f_momentum = st.checkbox("Above EMA21 (Momentum)", value=True)
-            f_macd     = st.checkbox("MACD Bullish Crossover", value=True)
-            f_volume   = st.checkbox("Volume > 1.2x Avg", value=True)
-        with fc4:
-            f_breakout = st.checkbox("Near 52W High (>85%)", value=False)
-            f_ema200   = st.checkbox("Above 200 EMA (Long-term)", value=False)
-            f_low_beta = st.checkbox("Low Beta (<1.3)", value=False)
+            st.markdown("**Gate 4 — Entry Zone**")
+            f_pullback   = st.checkbox("Near EMA21 or EMA50 pullback (within 3%)", value=True)
+            f_vol_expand = st.checkbox("Volume expanding on bounce day", value=True)
+            st.markdown("**Gate 5 — R:R**")
+            min_rr = st.slider("Minimum R:R", 1.5, 4.0, 2.5, 0.5)
+            max_pe = st.slider("Max PE", 10, 100, 60)
 
         batch_size = st.select_slider(
             "Batch size (stocks per chunk)",
@@ -821,81 +899,117 @@ with tab_scanner:
                 prog.progress(scanned / total, text=f"Scanning {sym} ({scanned}/{total})...")
                 try:
                     d = fetch_stock_data(sym)
+                    p = d["price"]
+                    reasons  = []
+                    fail_at  = None
+
+                    # ── GATE 1: LIQUIDITY ────────────────────────────────────
+                    # avg volume in lakhs
+                    avg_vol_l = 0
+                    if d.get("hist") is not None:
+                        avg_vol_l = float(d["hist"]["Volume"].rolling(20).mean().iloc[-1]) / 1e5
+                    if avg_vol_l < min_vol_l:
+                        fail_at = f"G1: Vol {avg_vol_l:.1f}L < {min_vol_l}L"
+                    elif not (min_price <= p <= max_price):
+                        fail_at = f"G1: Price ₹{p} out of range"
+                    elif d["pe"] <= 0 or d["pe"] > max_pe:
+                        fail_at = f"G1: PE {d['pe']} invalid/high"
+                    if fail_at:
+                        continue
+
+                    # ── GATE 2: TREND (hard — no checkbox, always required) ──
                     t = compute_technicals(d)
-                    score   = 0
-                    reasons = []
-                    criteria = {}
+                    ema50 = round(float(d["hist"]["Close"].ewm(span=50, adjust=False).mean().iloc[-1]), 2) if d.get("hist") is not None else p
+                    if p < t["ema200"]:
+                        fail_at = "G2: Price below 200 EMA"
+                    elif ema50 < t["ema200"]:
+                        fail_at = "G2: 50 EMA below 200 EMA — not in bull trend"
+                    elif p < t["ema21"]:
+                        fail_at = "G2: Price below 20 EMA"
+                    if fail_at:
+                        continue
+                    reasons.append(f"✅ Trend: P>{round(t['ema200'],0)} EMA200, EMA50>{round(t['ema200'],0)}")
 
-                    ok = min_rsi <= d["rsi"] <= max_rsi
-                    criteria["rsi"] = ok
-                    if ok: score += 20; reasons.append(f"RSI {d['rsi']} in momentum zone")
+                    # ── GATE 3: MOMENTUM ─────────────────────────────────────
+                    if not (min_rsi <= d["rsi"] <= max_rsi):
+                        continue
+                    reasons.append(f"✅ RSI {d['rsi']} in {min_rsi}–{max_rsi} zone")
 
-                    ok = not f_momentum or d["price"] > t["ema21"]
-                    criteria["ema"] = ok
-                    if ok: score += 15; reasons.append("Price above EMA21")
+                    if f_macd_fresh:
+                        # Fresh = histogram positive AND was negative 2 bars ago
+                        if d.get("hist") is not None:
+                            c  = d["hist"]["Close"]
+                            ml = c.ewm(span=12, adjust=False).mean() - c.ewm(span=26, adjust=False).mean()
+                            ms = ml.ewm(span=9,  adjust=False).mean()
+                            mh = ml - ms
+                            if not (mh.iloc[-1] > 0 and mh.iloc[-3] < 0):
+                                continue
+                            reasons.append("✅ MACD fresh bullish crossover")
+                        else:
+                            if t["macd_hist"] <= 0:
+                                continue
 
-                    ok = not f_macd or t["macd_hist"] > 0
-                    criteria["macd"] = ok
-                    if ok: score += 15; reasons.append("MACD bullish")
+                    # ── GATE 4: ENTRY ZONE ───────────────────────────────────
+                    if f_pullback:
+                        near_ema21 = abs(p - t["ema21"]) / p * 100 <= 3.0
+                        near_ema50 = abs(p - ema50)     / p * 100 <= 3.0
+                        if not (near_ema21 or near_ema50):
+                            continue
+                        reasons.append(f"✅ At EMA pullback zone ({'EMA21' if near_ema21 else 'EMA50'})")
 
-                    ok = not f_volume or t["volr"] >= 1.2
-                    criteria["vol"] = ok
-                    if ok: score += 10; reasons.append(f"Vol {t['volr']}x avg")
+                    if f_vol_expand:
+                        # Volume today > yesterday AND > 20-day avg
+                        if d.get("hist") is not None and len(d["hist"]) >= 3:
+                            v_today = float(d["hist"]["Volume"].iloc[-1])
+                            v_yest  = float(d["hist"]["Volume"].iloc[-2])
+                            v_avg   = float(d["hist"]["Volume"].rolling(20).mean().iloc[-1])
+                            if not (v_today > v_yest and v_today > v_avg):
+                                continue
+                            reasons.append(f"✅ Volume expanding ({round(v_today/v_avg,1)}x avg)")
 
-                    ok = d["atr_pct"] >= min_atr
-                    criteria["atr"] = ok
-                    if ok: score += 10; reasons.append(f"ATR {d['atr_pct']}% — swing-worthy")
+                    # ── GATE 5: R:R ──────────────────────────────────────────
+                    sl  = round(p - d["atr"] * 1.5, 2)
+                    tgt = round(p + d["atr"] * 3.0, 2)
+                    rr  = round((tgt - p) / max(p - sl, 0.01), 1)
+                    if rr < min_rr:
+                        continue
+                    reasons.append(f"✅ R:R 1:{rr}")
 
-                    ok = d["pe"] <= max_pe
-                    criteria["val"] = ok
-                    if ok: score += 10; reasons.append(f"PE {d['pe']} ≤ {max_pe}")
+                    # ── QUALITY SCORE (for sorting, not filtering) ───────────
+                    score = 0
+                    if p > t["ema9"] > t["ema21"]:              score += 20
+                    if t["adx"] > 25 and t["di_pos"] > t["di_neg"]: score += 20
+                    if t["volr"] > 1.5:                          score += 15
+                    if d["rsi"] < 60:                            score += 15
+                    if t["macd_hist"] > 0:                       score += 15
+                    if d["atr_pct"] > 1.5:                       score += 15
 
-                    hi_prox = d["price"] / d["w52h"] * 100
-                    ok = not f_breakout or hi_prox >= 85
-                    criteria["hi52"] = ok
-                    if ok and f_breakout: score += 10; reasons.append(f"Near 52W High ({hi_prox:.0f}%)")
+                    entry = dict(
+                        sym=sym, name=d["name"], price=p,
+                        change=d["change_pct"], score=min(score, 100),
+                        reasons=reasons,
+                        criteria={
+                            "trend": True, "rsi": True,
+                            "macd": t["macd_hist"] > 0,
+                            "vol":  t["volr"] >= 1.2,
+                            "rr":   rr >= min_rr,
+                        },
+                        rsi=d["rsi"], pe=d["pe"], pb=d["pb"],
+                        atr_pct=d["atr_pct"], beta=d["beta"],
+                        volr=t["volr"], macd_hist=t["macd_hist"],
+                        ema21=t["ema21"], ema200=t["ema200"],
+                        sector=d["sector"], w52h=d["w52h"], w52l=d["w52l"],
+                        sl=sl, tgt=tgt, rr=rr,
+                    )
+                    inserted = False
+                    for i, ex in enumerate(st.session_state["scan_results"]):
+                        if entry["score"] > ex["score"]:
+                            st.session_state["scan_results"].insert(i, entry)
+                            inserted = True
+                            break
+                    if not inserted:
+                        st.session_state["scan_results"].append(entry)
 
-                    ok = not f_ema200 or d["price"] > t["ema200"]
-                    criteria["ema200"] = ok
-                    if ok and f_ema200: score += 10; reasons.append("Above 200 EMA")
-
-                    ok = not f_low_beta or d["beta"] < 1.3
-                    criteria["beta"] = ok
-                    if ok and f_low_beta: score += 5
-
-                    # Bonuses — applied separately, score capped after
-                    bonus = 0
-                    if d["price"] > t["ema9"] > t["ema21"] > t["ema55"]: bonus += 5
-                    if t["adx"] > 22 and t["di_pos"] > t["di_neg"]:      bonus += 5
-
-                    sl  = round(d["price"] - d["atr"] * 1.5, 2)
-                    tgt = round(d["price"] + d["atr"] * 3,   2)
-                    rr  = round((tgt - d["price"]) / max(d["price"] - sl, 0.01), 1)
-
-                    base_score = min(score, 100)   # cap base before bonus
-                    final_score = min(base_score + bonus, 100)
-
-                    if final_score >= 40:
-                        entry = dict(
-                            sym=sym, name=d["name"], price=d["price"],
-                            change=d["change_pct"], score=final_score,
-                            reasons=reasons, criteria=criteria,
-                            rsi=d["rsi"], pe=d["pe"], pb=d["pb"],
-                            atr_pct=d["atr_pct"], beta=d["beta"],
-                            volr=t["volr"], macd_hist=t["macd_hist"],
-                            ema21=t["ema21"], ema200=t["ema200"],
-                            sector=d["sector"], w52h=d["w52h"], w52l=d["w52l"],
-                            sl=sl, tgt=tgt, rr=rr,
-                        )
-                        # Insert in sorted order (descending score)
-                        inserted = False
-                        for i, ex in enumerate(st.session_state["scan_results"]):
-                            if entry["score"] > ex["score"]:
-                                st.session_state["scan_results"].insert(i, entry)
-                                inserted = True
-                                break
-                        if not inserted:
-                            st.session_state["scan_results"].append(entry)
                 except Exception:
                     pass
 
@@ -936,11 +1050,11 @@ with tab_scanner:
 
             cr = s["criteria"]
             dots = (
+                f'{dot(cr.get("trend"))} Trend &nbsp;'
                 f'{dot(cr.get("rsi"))} RSI &nbsp;'
-                f'{dot(cr.get("ema"))} EMA &nbsp;'
                 f'{dot(cr.get("macd"))} MACD &nbsp;'
                 f'{dot(cr.get("vol"))} Volume &nbsp;'
-                f'{dot(cr.get("atr"))} ATR'
+                f'{dot(cr.get("rr"))} R:R'
             )
             sector_safe = safe_html(s["sector"])
             sector_tag  = (
@@ -1129,10 +1243,15 @@ with tab_analyzer:
                  f"₹{price_t:,.2f} ({'+' if data['change_pct']>=0 else ''}{data['change_pct']:.2f}% today). "
                  f"{'Higher highs/lows — uptrend.' if data['change_pct']>0 else 'Flat/declining structure.'} "
                  f"Beta {data['beta']:.2f}. ATR ₹{data['atr']} ({data['atr_pct']}%) daily range.", "gc-blue"),
-                ("2. Pivots & S/R",
-                 f"Pivot ₹{tech['pivot']:,.2f} | R1 ₹{tech['r1']:,.2f} | R2 ₹{tech['r2']:,.2f} | S1 ₹{tech['s1']:,.2f} | S2 ₹{tech['s2']:,.2f}. "
-                 f"Price {'above pivot — bullish bias.' if price_t>tech['pivot'] else 'below pivot — bearish bias.'} "
-                 f"CPR ₹{round(tech['r1']-tech['s1'],2)} — {'narrow: breakout likely.' if (tech['r1']-tech['s1'])/price_t<0.015 else 'wide: consolidation.'}", "gc-cyan"),
+                ("2. Pivots & S/R (Weekly + Monthly)",
+                 f"<b>Weekly</b>: Pivot ₹{tech['w_pivot']:,.2f} | R1 ₹{tech['w_r1']:,.2f} | R2 ₹{tech['w_r2']:,.2f} | S1 ₹{tech['w_s1']:,.2f} | S2 ₹{tech['w_s2']:,.2f} · CPR width {tech['w_cpr_pct']}% {'(narrow — breakout likely 🔥)' if tech['w_cpr_pct'] < 0.5 else '(wide — range/consolidation)' if tech['w_cpr_pct'] > 2.0 else '(moderate)'}. "
+                 f"Price {'above weekly pivot — bullish bias ✅' if price_t > tech['w_pivot'] else 'below weekly pivot — bearish bias ⚠️'}.<br>"
+                 f"<b>Monthly</b>: Pivot ₹{tech['m_pivot']:,.2f} | R1 ₹{tech['m_r1']:,.2f} | S1 ₹{tech['m_s1']:,.2f} · CPR {tech['m_cpr_pct']}%.<br>"
+                 f"<b>Key Resistance</b>: {', '.join(f'₹{x:,.2f}' for x in tech['key_res']) if tech['key_res'] else 'None found'} · "
+                 f"<b>Key Support</b>: {', '.join(f'₹{x:,.2f}' for x in tech['key_sup']) if tech['key_sup'] else 'None found'}.<br>"
+                 f"<b>Round levels nearby</b>: {', '.join(f'₹{x:,.0f}' for x in tech['rounds']) if tech['rounds'] else '—'}. "
+                 f"52W High ₹{tech['w52h']:,.2f} ({tech['w52h_prox']}% away) · 52W Low ₹{tech['w52l']:,.2f} ({tech['w52l_prox']}% below).",
+                 "gc-cyan"),
                 ("3. Volume",
                  f"{data['volume']:,} vs 20-day avg {tech['vol20']:,} ({tech['volr']}x). "
                  f"{'🔥 Above avg — institutional confirmation.' if tech['volr']>1.5 else '⚠️ Below avg — low conviction.' if tech['volr']<0.8 else '✅ Near-average — steady.'}", "gc-green"),
