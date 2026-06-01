@@ -228,25 +228,50 @@ def fetch_nifty500_symbols():
 
 # ====================== DATA FETCH ===========================================
 @st.cache_data(ttl=180, show_spinner=False)
+@st.cache_data(ttl=180, show_spinner=False)
 def fetch_stock_data(symbol):
     try:
         tk = yf.Ticker(f"{symbol}.NS")
-        info = tk.info
-        # Normalize timezone — strip tz from yfinance index
-        hist = tk.history(period="1y")
+
+        # ── Price: fast_info first (doesn't hit NSE API), history close fallback ──
+        hist = tk.history(period="1y", auto_adjust=True)
         if not hist.empty:
-            hist.index = hist.index.tz_localize(None) if hist.index.tzinfo is None else hist.index.tz_convert(None)
+            hist.index = hist.index.tz_localize(None) if hist.index.tzinfo is None \
+                         else hist.index.tz_convert(None)
 
         if hist.empty or len(hist) < 10:
             raise ValueError("Empty history")
 
-        price = float(
-            info.get("currentPrice")
-            or info.get("regularMarketPrice")
-            or hist["Close"].iloc[-1]
-        )
-        prev = float(info.get("previousClose") or hist["Close"].iloc[-2])
+        # fast_info is lightweight — doesn't require full info dict
+        try:
+            fi = tk.fast_info
+            price = float(fi.last_price or fi.regular_market_price or hist["Close"].iloc[-1])
+            prev  = float(fi.previous_close or hist["Close"].iloc[-2])
+        except Exception:
+            price = float(hist["Close"].iloc[-1])
+            prev  = float(hist["Close"].iloc[-2])
+
         chg = round((price - prev) / prev * 100, 2)
+
+        # ── Slower metadata — wrap separately so price never fails ──
+        try:
+            info   = tk.info
+            beta   = float(info.get("beta") or 1.0)
+            pe     = float(info.get("trailingPE") or 0)
+            pb_val = float(info.get("priceToBook") or 3.5)
+            sector = info.get("sector", "Unknown") or "Unknown"
+            name   = info.get("longName", symbol) or symbol
+            volume = int(info.get("volume") or hist["Volume"].iloc[-1])
+        except Exception:
+            beta   = 1.0
+            pe     = 0.0
+            pb_val = 3.5
+            sector = "Unknown"
+            name   = symbol
+            volume = int(hist["Volume"].iloc[-1])
+
+        pe = round(pe, 1) if pe and pe > 0 else 25.0
+        pb_val = round(pb_val, 2)
 
         # RSI — Wilder's smoothing
         delta = hist["Close"].diff()
@@ -258,19 +283,12 @@ def fetch_stock_data(symbol):
         tr = pd.concat([
             hist["High"] - hist["Low"],
             (hist["High"] - hist["Close"].shift()).abs(),
-            (hist["Low"] - hist["Close"].shift()).abs(),
+            (hist["Low"]  - hist["Close"].shift()).abs(),
         ], axis=1).max(axis=1)
-        atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
+        atr     = round(float(tr.rolling(14).mean().iloc[-1]), 2)
         atr_pct = round(atr / price * 100, 2) if price > 0 else 0
-
-        beta = float(info.get("beta") or 1.0)
-        volume = int(info.get("volume") or hist["Volume"].iloc[-1])
-        pe = round(float(info.get("trailingPE") or 25), 1)
-        pb_val = round(float(info.get("priceToBook") or 3.5), 2)
-        sector = info.get("sector", "Unknown")
-        name = info.get("longName", symbol)
-        w52h = round(float(hist["High"].max()), 2)
-        w52l = round(float(hist["Low"].min()), 2)
+        w52h    = round(float(hist["High"].max()), 2)
+        w52l    = round(float(hist["Low"].min()),  2)
 
         return dict(
             price=round(price, 2), change_pct=chg, rsi=rsi, atr=atr,
@@ -279,11 +297,11 @@ def fetch_stock_data(symbol):
             w52h=w52h, w52l=w52l,
         )
 
-    except Exception:
-        st.warning(f"⚠️ Live data failed for {symbol} — using demo data")
+    except Exception as e:
+        st.warning(f"⚠️ Data fetch failed for {symbol} ({e}) — using demo data")
         return dict(
             price=334.55, change_pct=3.46, rsi=58.4, atr=8.2, atr_pct=2.45,
-            beta=1.06, volume=18310000, pe=6.85, pb=3.70, hist=None,
+            beta=1.06, volume=18310000, pe=25.0, pb=3.70, hist=None,
             source="DEMO", sector="Unknown", name=symbol, w52h=420.0, w52l=240.0,
         )
 
@@ -1685,7 +1703,8 @@ with tab_analyzer:
                     unsafe_allow_html=True,
                 )
             with tc3:
-                anniv_days_away = (cd["next_anniv_date"] - today).days if cd["next_anniv_date"] else "—"
+                _today = gd["today"]
+                anniv_days_away = (cd["next_anniv_date"] - _today).days if cd["next_anniv_date"] else "—"
                 st.markdown(
                     f'<div class="gc {"gc-green" if cd["tool3_active"] else "gc-red"}"><div style="font-weight:700;font-size:13px;margin-bottom:6px">'
                     f'{"✅" if cd["tool3_active"] else "❌"} Tool 3: Anniversary</div>'
@@ -1850,4 +1869,4 @@ with tab_analyzer:
         st.markdown(
             '<div style="color:#475569;text-align:center;padding:40px 0">Enter an NSE symbol above and press Search</div>',
             unsafe_allow_html=True,
-)
+                )
