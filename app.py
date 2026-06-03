@@ -1095,8 +1095,340 @@ def combined_verdict(tech_score, gann_confluence):
     return final, lbl, cls, icon, tech_norm, gann_norm
 
 
+# ====================== INDEX DATA FETCH =====================================
+INDEX_MAP = {
+    "NIFTY 50":    {"yf": "^NSEI",   "label": "Nifty 50",    "color": "#3b82f6", "lot": 25},
+    "BANK NIFTY":  {"yf": "^NSEBANK","label": "Bank Nifty",  "color": "#8b5cf6", "lot": 15},
+    "SENSEX":      {"yf": "^BSESN",  "label": "Sensex",      "color": "#f59e0b", "lot": 10},
+    "NIFTY IT":    {"yf": "^CNXIT",  "label": "Nifty IT",    "color": "#06b6d4", "lot": 25},
+    "NIFTY MIDCAP":{"yf": "^NSEMDCP50","label":"Nifty Midcap 50","color":"#10b981","lot": 75},
+    "FINNIFTY":    {"yf": "NIFTY_FIN_SERVICE.NS","label":"Fin Nifty","color":"#ef4444","lot": 40},
+}
+
+@st.cache_data(ttl=180, show_spinner=False)
+def fetch_index_data(yf_symbol):
+    try:
+        tk = yf.Ticker(yf_symbol)
+        hist1y = tk.history(period="1y", auto_adjust=True)
+        if hist1y.empty:
+            raise ValueError("Empty 1y history")
+        hist1y.index = hist1y.index.tz_localize(None) if hist1y.index.tzinfo is None else hist1y.index.tz_convert(None)
+
+        price = float(hist1y["Close"].iloc[-1])
+        prev  = float(hist1y["Close"].iloc[-2])
+        chg   = round((price - prev) / prev * 100, 2)
+
+        # RSI
+        delta = hist1y["Close"].diff()
+        g = delta.clip(lower=0).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        l = (-delta.clip(upper=0)).ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        rsi = round(float((100 - 100 / (1 + g / l)).iloc[-1]), 1)
+
+        # EMAs
+        ema9   = round(float(hist1y["Close"].ewm(span=9,   adjust=False).mean().iloc[-1]), 2)
+        ema21  = round(float(hist1y["Close"].ewm(span=21,  adjust=False).mean().iloc[-1]), 2)
+        ema50  = round(float(hist1y["Close"].ewm(span=50,  adjust=False).mean().iloc[-1]), 2)
+        ema200 = round(float(hist1y["Close"].ewm(span=200, adjust=False).mean().iloc[-1]), 2)
+
+        # MACD
+        ml = hist1y["Close"].ewm(span=12, adjust=False).mean() - hist1y["Close"].ewm(span=26, adjust=False).mean()
+        ms = ml.ewm(span=9, adjust=False).mean()
+        macd_hist = round(float((ml - ms).iloc[-1]), 2)
+
+        # ATR
+        tr = pd.concat([
+            hist1y["High"] - hist1y["Low"],
+            (hist1y["High"] - hist1y["Close"].shift()).abs(),
+            (hist1y["Low"]  - hist1y["Close"].shift()).abs(),
+        ], axis=1).max(axis=1)
+        atr = round(float(tr.rolling(14).mean().iloc[-1]), 2)
+
+        # ADX / DI
+        atr14 = tr.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        dmp_raw = hist1y["High"].diff().clip(lower=0)
+        dmn_raw = (-hist1y["Low"].diff()).clip(lower=0)
+        dmp = dmp_raw.where(dmp_raw > dmn_raw, 0)
+        dmn = dmn_raw.where(dmn_raw > dmp_raw, 0)
+        di_pos = round(float((dmp.ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr14 * 100).iloc[-1]), 1)
+        di_neg = round(float((dmn.ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr14 * 100).iloc[-1]), 1)
+        di_pos_s = dmp.ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr14 * 100
+        di_neg_s = dmn.ewm(alpha=1/14, min_periods=14, adjust=False).mean() / atr14 * 100
+        dx = ((di_pos_s - di_neg_s).abs() / (di_pos_s + di_neg_s).clip(lower=0.01) * 100)
+        adx = round(float(dx.ewm(alpha=1/14, min_periods=14, adjust=False).mean().iloc[-1]), 1)
+
+        # Bollinger
+        bb_mid   = round(float(hist1y["Close"].rolling(20).mean().iloc[-1]), 2)
+        bb_std   = float(hist1y["Close"].rolling(20).std().iloc[-1])
+        bb_upper = round(bb_mid + 2 * bb_std, 2)
+        bb_lower = round(bb_mid - 2 * bb_std, 2)
+
+        # 52w
+        w52h = round(float(hist1y["High"].max()), 2)
+        w52l = round(float(hist1y["Low"].min()),  2)
+
+        # Weekly/Monthly Pivots
+        h_copy = hist1y.copy()
+        h_copy.index = pd.to_datetime(h_copy.index)
+        weekly = h_copy.resample("W").agg({"High":"max","Low":"min","Close":"last"}).dropna()
+        if len(weekly) >= 2:
+            wph = float(weekly["High"].iloc[-2]); wpl = float(weekly["Low"].iloc[-2]); wpc = float(weekly["Close"].iloc[-2])
+        else:
+            wph = float(hist1y["High"].iloc[-2]); wpl = float(hist1y["Low"].iloc[-2]); wpc = float(hist1y["Close"].iloc[-2])
+        w_pivot = round((wph+wpl+wpc)/3,2); w_r1 = round(2*w_pivot-wpl,2); w_s1 = round(2*w_pivot-wph,2)
+        w_r2 = round(w_pivot+(wph-wpl),2); w_s2 = round(w_pivot-(wph-wpl),2)
+
+        monthly = h_copy.resample("ME").agg({"High":"max","Low":"min","Close":"last"}).dropna()
+        if len(monthly) >= 2:
+            mph = float(monthly["High"].iloc[-2]); mpl = float(monthly["Low"].iloc[-2]); mpc = float(monthly["Close"].iloc[-2])
+        else:
+            mph,mpl,mpc = wph,wpl,wpc
+        m_pivot = round((mph+mpl+mpc)/3,2); m_r1 = round(2*m_pivot-mpl,2); m_s1 = round(2*m_pivot-mph,2)
+        m_r2 = round(m_pivot+(mph-mpl),2); m_s2 = round(m_pivot-(mph-mpl),2)
+
+        return dict(
+            price=round(price, 2), change_pct=chg, rsi=rsi,
+            ema9=ema9, ema21=ema21, ema50=ema50, ema200=ema200,
+            macd_hist=macd_hist, atr=atr, adx=adx, di_pos=di_pos, di_neg=di_neg,
+            bb_upper=bb_upper, bb_lower=bb_lower, bb_mid=bb_mid,
+            w52h=w52h, w52l=w52l,
+            w_pivot=w_pivot, w_r1=w_r1, w_s1=w_s1, w_r2=w_r2, w_s2=w_s2,
+            m_pivot=m_pivot, m_r1=m_r1, m_s1=m_s1, m_r2=m_r2, m_s2=m_s2,
+            hist=hist1y,
+        )
+    except Exception as e:
+        return None
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_index_long_history(yf_symbol):
+    try:
+        tk = yf.Ticker(yf_symbol)
+        h = tk.history(period="10y", auto_adjust=True)
+        if h.empty:
+            h = tk.history(period="5y", auto_adjust=True)
+        if not h.empty:
+            h.index = h.index.tz_localize(None) if h.index.tzinfo is None else h.index.tz_convert(None)
+        return h if not h.empty else None
+    except Exception:
+        return None
+
+
+def compute_index_gann(yf_symbol, price, hist1y):
+    """Compute Gann analysis for index using long history."""
+    long_hist = fetch_index_long_history(yf_symbol)
+    hist = long_hist if (long_hist is not None and not long_hist.empty) else hist1y
+    today = datetime.now().date()
+
+    if hist is not None and len(hist) >= 50:
+        anchor_result = _find_significant_anchor(hist)
+        if anchor_result:
+            anchor_low, anchor_low_date, anchor_high, anchor_high_date = anchor_result
+        else:
+            anchor_low  = round(float(hist["Low"].min()), 2)
+            anchor_high = round(float(hist["High"].max()), 2)
+            anchor_low_date  = hist["Low"].idxmin().date()
+            anchor_high_date = hist["High"].idxmax().date()
+    else:
+        anchor_low  = round(price * 0.72, 2)
+        anchor_high = round(price * 1.22, 2)
+        anchor_low_date  = today - timedelta(days=500)
+        anchor_high_date = today - timedelta(days=90)
+
+    hl_range       = round(anchor_high - anchor_low, 2)
+    days_from_low  = (today - anchor_low_date).days
+    days_from_high = (today - anchor_high_date).days
+    price_range    = max(anchor_high - anchor_low, 1.0)
+    time_range     = max(days_from_low, 1)
+    scale          = round(price_range / time_range, 4)
+
+    # Angles
+    angle_4x1 = round(anchor_low + days_from_low * scale * 4,    2)
+    angle_2x1 = round(anchor_low + days_from_low * scale * 2,    2)
+    angle_1x1 = round(anchor_low + days_from_low * scale * 1,    2)
+    angle_1x2 = round(anchor_low + days_from_low * scale * 0.5,  2)
+    angle_1x4 = round(anchor_low + days_from_low * scale * 0.25, 2)
+
+    angles = {"4×1": angle_4x1, "2×1": angle_2x1, "1×1": angle_1x1, "1×2": angle_1x2, "1×4": angle_1x4}
+    closest_angle = min(angles, key=lambda k: abs(angles[k] - price))
+    price_vs_1x1  = round((price - angle_1x1) / max(angle_1x1, 1) * 100, 1)
+
+    if price >= angle_2x1:
+        angle_label = "Above 2×1 (Very Strong Bull)"; angle_color = "#10b981"
+    elif price >= angle_1x1:
+        angle_label = "1×1–2×1 (Bull Zone)";          angle_color = "#10b981"
+    elif price >= angle_1x2:
+        angle_label = "1×2–1×1 (Weak / Caution)";     angle_color = "#f59e0b"
+    else:
+        angle_label = "Below 1×2 (Bear)";              angle_color = "#ef4444"
+
+    # Square of Nine
+    sq9_all = _sq9_levels(price)
+    sq9_supports    = [(l, p2, s) for l, p2, s in sq9_all if p2 < price]
+    sq9_resistances = [(l, p2, s) for l, p2, s in sq9_all if p2 > price]
+    sq9_s1 = sq9_supports[-1]   if sq9_supports    else ("—", price, "—")
+    sq9_s2 = sq9_supports[-2]   if len(sq9_supports) >= 2 else sq9_s1
+    sq9_r1 = sq9_resistances[0] if sq9_resistances  else ("—", price, "—")
+    sq9_r2 = sq9_resistances[1] if len(sq9_resistances) >= 2 else sq9_r1
+
+    nearest_sq9_price = min([p2 for _, p2, _ in sq9_all], key=lambda x: abs(x - price))
+    price_sq9_dev     = abs(nearest_sq9_price - price) / price * 100
+    at_sq9_tight      = price_sq9_dev <= 0.5
+    at_sq9_moderate   = price_sq9_dev <= 1.5
+    at_1x1            = abs(price - angle_1x1) / max(price, 1) * 100 <= 1.0
+
+    # Time cycles
+    active_tools, cycle_details = _time_cycle_confluence(anchor_low_date, today)
+    time_strong   = active_tools >= 3
+    time_moderate = active_tools >= 2
+
+    # Confluence
+    confluence = 0; reasons = []
+    if at_sq9_tight and at_1x1 and time_strong:
+        confluence = 5; reasons.append("🔥 TIER 1: Sq9 tight + 1×1 angle + 3/3 time tools")
+    elif (at_sq9_tight or at_sq9_moderate) and time_strong:
+        confluence = 4; reasons.append("✅ TIER 2: Sq9 level + strong time cycle (3 tools)")
+    elif at_sq9_tight and (at_1x1 or time_moderate):
+        confluence = 4; reasons.append("✅ TIER 2: Sq9 tight + angle/time confluence")
+    elif at_sq9_moderate and time_moderate:
+        confluence = 3; reasons.append("✅ TIER 3: Sq9 moderate + 2/3 time tools")
+    elif at_sq9_moderate or time_moderate or at_1x1:
+        confluence = 2; reasons.append("⚡ TIER 4: Single confluence — wait for more alignment")
+    else:
+        confluence = 1; reasons.append("⚪ No meaningful confluence — between levels")
+
+    reasons.append(f"   Sq9 nearest {nearest_sq9_price:,.2f} · deviation {price_sq9_dev:.2f}%")
+    reasons.append(f"   1×1 angle {angle_1x1:,.2f} · deviation {abs(price_vs_1x1):.1f}%")
+    reasons.append(f"   Time tools: {active_tools}/3 · Same-window pairs: {cycle_details['same_window_pairs']}")
+
+    # Price-time squaring
+    scaled_time  = days_from_low * scale
+    squaring_pct = round(abs(price - scaled_time) / max(price, 1) * 100, 1)
+    is_squared   = squaring_pct < 3.0
+
+    # Gann time units future dates
+    gann_time_units = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
+    gann_future = []
+    for t in gann_time_units:
+        fd = anchor_low_date + timedelta(days=t)
+        if fd >= today:
+            gann_future.append((t, fd, (fd - today).days))
+        if len(gann_future) >= 5:
+            break
+
+    sq_dates = []
+    n_start = int(math.sqrt(days_from_low)) + 1
+    for i in range(n_start, n_start + 5):
+        d = i * i
+        sd = anchor_low_date + timedelta(days=d)
+        if sd >= today:
+            sq_dates.append((d, sd, (sd - today).days, i))
+
+    range_sqrt      = round(math.sqrt(hl_range), 4)
+    range_sq_target = round((math.ceil(range_sqrt) + 1) ** 2, 2)
+
+    return dict(
+        confluence=confluence, reasons=reasons,
+        angle_label=angle_label, angle_color=angle_color,
+        price_vs_1x1=price_vs_1x1, closest_angle=closest_angle,
+        anchor_low=anchor_low, anchor_high=anchor_high,
+        anchor_low_date=anchor_low_date, anchor_high_date=anchor_high_date,
+        days_from_low=days_from_low, days_from_high=days_from_high,
+        hl_range=hl_range, scale=scale,
+        angle_4x1=angle_4x1, angle_2x1=angle_2x1, angle_1x1=angle_1x1,
+        angle_1x2=angle_1x2, angle_1x4=angle_1x4,
+        sq9_s1=sq9_s1, sq9_s2=sq9_s2, sq9_r1=sq9_r1, sq9_r2=sq9_r2,
+        nearest_sq9_price=nearest_sq9_price, price_sq9_dev=price_sq9_dev,
+        sq9_root=round(math.sqrt(price), 4),
+        gann_t1=sq9_r1[1], gann_t2=sq9_r2[1], gann_sl=sq9_s2[1],
+        is_squared=is_squared, squaring_pct=squaring_pct,
+        scaled_time=round(scaled_time, 2),
+        sq_levels=sq9_all, gann_future=gann_future, sq_dates=sq_dates,
+        range_sqrt=range_sqrt, range_sq_target=range_sq_target,
+        active_tools=active_tools, cycle_details=cycle_details,
+        today=today, hist=hist,
+    )
+
+
+def _build_index_gann_chart(hist, gd, price, index_label):
+    """Gann chart with angles + Sq9 levels for index."""
+    if hist is None or len(hist) < 10:
+        return None
+    anchor_dt   = pd.Timestamp(gd["anchor_low_date"])
+    hist_after  = hist[hist.index >= anchor_dt].copy()
+    if hist_after.empty:
+        return None
+
+    days_arr  = [(idx - anchor_dt).days for idx in hist_after.index]
+    close_arr = hist_after["Close"].tolist()
+    high_arr  = hist_after["High"].tolist()
+    low_arr   = hist_after["Low"].tolist()
+
+    max_days  = max(days_arr) if days_arr else 1
+    proj_days = int(max_days * 1.25)
+    angle_x   = list(range(0, proj_days, 1))
+    scale     = gd["scale"]
+    anchor_low = gd["anchor_low"]
+
+    fig = go.Figure()
+    fig.add_trace(go.Candlestick(
+        x=days_arr, open=hist_after["Open"].tolist(),
+        high=high_arr, low=low_arr, close=close_arr,
+        name="Price", increasing_line_color="#10b981",
+        decreasing_line_color="#ef4444", showlegend=False,
+    ))
+
+    for rate, label, color, dash in [
+        (scale*4, "4×1","#ef4444","dash"), (scale*2,"2×1","#f59e0b","dash"),
+        (scale*1, "1×1","#10b981","solid"),(scale*0.5,"1×2","#f59e0b","dot"),
+        (scale*0.25,"1×4","#ef4444","dot"),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=angle_x, y=[anchor_low + d*rate for d in angle_x],
+            mode="lines", name=label,
+            line=dict(color=color, width=2 if label=="1×1" else 1, dash=dash),
+            opacity=0.85,
+        ))
+
+    # Sq9 levels
+    for lbl, lv_price, spoke in gd["sq_levels"]:
+        if not isinstance(lv_price, (int, float)):
+            continue
+        col = "#3b82f6" if "Resistance" in lbl else "#8b5cf6"
+        fig.add_hline(y=lv_price, line_color=col, line_width=0.7, line_dash="dot",
+                      opacity=0.5,
+                      annotation_text=f"{lv_price:,.0f}",
+                      annotation_font_size=9, annotation_font_color=col)
+
+    # Current price
+    fig.add_hline(y=price, line_color="#ffffff", line_width=1.2,
+                  annotation_text=f"▶ {price:,.2f}", annotation_font_size=10,
+                  annotation_font_color="#ffffff")
+
+    # Anchor marker
+    fig.add_trace(go.Scatter(
+        x=[0], y=[anchor_low], mode="markers+text",
+        marker=dict(color="#f59e0b", size=12, symbol="triangle-up"),
+        text=[f"Anchor\n{anchor_low:,.0f}"], textposition="bottom center",
+        textfont=dict(color="#f59e0b", size=10), name="Anchor", showlegend=False,
+    ))
+
+    fig.update_layout(
+        height=540, paper_bgcolor="#060810", plot_bgcolor="#0d1117",
+        font=dict(family="Space Grotesk", color="#94a3b8", size=11),
+        title=dict(text=f"{index_label} — Gann Scaled Chart (scale: {scale:.2f} pts/day)",
+                   font=dict(color="#f59e0b", size=13)),
+        xaxis=dict(title="Days from Anchor Low", gridcolor="rgba(255,255,255,0.05)", color="#64748b"),
+        yaxis=dict(title="Index Value", gridcolor="rgba(255,255,255,0.05)", color="#64748b"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, bgcolor="rgba(0,0,0,0)",
+                    font=dict(color="#94a3b8", size=10)),
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=60, r=40, t=60, b=40),
+    )
+    return fig
+
+
 # ====================== TABS =================================================
-tab_scanner, tab_analyzer = st.tabs(["🔍  Stock Scanner", "🔵  Analyzer"])
+tab_scanner, tab_analyzer, tab_index = st.tabs(["🔍  Stock Scanner", "🔵  Analyzer", "📊  Index Gann"])
 
 
 # ====================================================================
@@ -1870,3 +2202,356 @@ with tab_analyzer:
             '<div style="color:#475569;text-align:center;padding:40px 0">Enter an NSE symbol above and press Search</div>',
             unsafe_allow_html=True,
                 )
+
+# ====================================================================
+# INDEX GANN TAB
+# ====================================================================
+with tab_index:
+    st.markdown('<div class="sec-title">📊 Index Gann Analyzer — Nifty · Bank Nifty · Sensex</div>', unsafe_allow_html=True)
+    st.caption("Full Gann analysis for major Indian indices · Square of Nine · Angles · Time Cycles · Confluence")
+
+    # ── Index selector ─────────────────────────────────────────────────────
+    ic1, ic2 = st.columns([3, 1])
+    with ic1:
+        selected_index = st.selectbox(
+            "Select Index",
+            list(INDEX_MAP.keys()),
+            label_visibility="collapsed",
+        )
+    with ic2:
+        st.markdown("<div style='margin-top:1px'></div>", unsafe_allow_html=True)
+        analyze_index = st.button("Analyze Index", type="primary", use_container_width=True, key="btn_idx")
+
+    if analyze_index and selected_index:
+        cfg = INDEX_MAP[selected_index]
+        yf_sym  = cfg["yf"]
+        ilabel  = cfg["label"]
+        icolor  = cfg["color"]
+
+        with st.spinner(f"Fetching {ilabel} data..."):
+            idata = fetch_index_data(yf_sym)
+
+        if idata is None:
+            st.error(f"Could not fetch data for {ilabel}. Please try again.")
+        else:
+            price  = idata["price"]
+            chg    = idata["change_pct"]
+            c_col  = "#10b981" if chg >= 0 else "#ef4444"
+            chg_arrow = "▲" if chg >= 0 else "▼"
+
+            # ── INDEX HEADER ──────────────────────────────────────────────
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,rgba(255,255,255,0.05),rgba(255,255,255,0.01));
+                border:1px solid {icolor}33;border-radius:20px;padding:24px 28px;margin-bottom:20px;
+                box-shadow:0 4px 32px rgba(0,0,0,0.5)">
+                <div style="display:flex;justify-content:space-between;align-items:center">
+                    <div>
+                        <div style="font-size:1.5rem;font-weight:900;letter-spacing:-1px;color:{icolor};margin-bottom:4px">{ilabel}</div>
+                        <div style="font-size:2.8rem;font-weight:900;font-family:'JetBrains Mono',monospace;color:#e8edf5;line-height:1.1;margin-bottom:4px">{price:,.2f}</div>
+                        <div style="color:{c_col};font-weight:700;font-size:15px">{chg_arrow} {abs(chg):.2f}%</div>
+                    </div>
+                    <div style="text-align:right">
+                        <div style="color:#94a3b8;font-size:12px;text-transform:uppercase;letter-spacing:1px">RSI</div>
+                        <div style="font-size:28px;font-weight:700;color:#e8edf5">{idata['rsi']}</div>
+                        <div style="color:#94a3b8;font-size:12px;margin-top:8px">52W H / L</div>
+                        <div style="font-size:13px;font-weight:600;color:#e8edf5">{idata['w52h']:,.0f} / {idata['w52l']:,.0f}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── QUICK KPIs ────────────────────────────────────────────────
+            k1,k2,k3,k4,k5,k6 = st.columns(6)
+            for col, (lab, val, vc) in zip(
+                [k1,k2,k3,k4,k5,k6],
+                [("EMA21", f"{idata['ema21']:,.0f}", "#38bdf8"),
+                 ("EMA50", f"{idata['ema50']:,.0f}", "#38bdf8"),
+                 ("EMA200", f"{idata['ema200']:,.0f}", "#38bdf8"),
+                 ("ADX", f"{idata['adx']:.1f}", "#f59e0b"),
+                 ("ATR", f"{idata['atr']:,.0f}", "#94a3b8"),
+                 ("MACD Hist", f"{idata['macd_hist']:+.1f}", "#10b981" if idata['macd_hist']>0 else "#ef4444")],
+            ):
+                with col:
+                    st.markdown(kpi(lab, val, vc), unsafe_allow_html=True)
+
+            # ── INNER TABS ─────────────────────────────────────────────────
+            itab_overview, itab_tech, itab_gann = st.tabs(
+                ["📊 Overview", "📈 Technicals", "🔶 Gann Analysis"]
+            )
+
+            # ── OVERVIEW TAB ──────────────────────────────────────────────
+            with itab_overview:
+                ov1, ov2 = st.columns(2)
+                with ov1:
+                    # Trend summary
+                    above200 = price > idata["ema200"]
+                    above50  = price > idata["ema50"]
+                    above21  = price > idata["ema21"]
+                    trend_lbl = "Strong Bull" if above200 and above50 and above21 \
+                                else "Bull" if above200 and above50 \
+                                else "Caution" if above200 \
+                                else "Bear"
+                    trend_col = "#10b981" if "Bull" in trend_lbl else "#f59e0b" if "Caution" in trend_lbl else "#ef4444"
+
+                    bb_pos = "Extended" if price > idata["bb_upper"] else \
+                             "Lower band (oversold zone)" if price < idata["bb_lower"] else "Within bands"
+
+                    st.markdown(f"""
+                    <div class="gc gc-blue">
+                        <div style="font-size:15px;font-weight:700;margin-bottom:12px">📈 Technical Snapshot</div>
+                        <div style="font-size:13px;color:#cbd5e1;line-height:1">
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">Trend</span><span style="font-weight:700;color:{trend_col}">{trend_lbl}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">RSI</span><span style="font-weight:700;color:#e8edf5">{idata['rsi']}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">ADX</span><span style="font-weight:700;color:#e8edf5">{idata['adx']:.1f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">+DI / -DI</span><span style="font-weight:700;color:{'#10b981' if idata['di_pos']>idata['di_neg'] else '#ef4444'}">{idata['di_pos']} / {idata['di_neg']}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">MACD Hist</span><span style="font-weight:700;color:{'#10b981' if idata['macd_hist']>0 else '#ef4444'}">{idata['macd_hist']:+.1f}</span></div>
+                            <div style="padding:6px 0;display:flex;justify-content:space-between"><span style="color:#64748b">Bollinger</span><span style="font-weight:700;color:#e8edf5">{bb_pos}</span></div>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+                with ov2:
+                    # Pivot levels
+                    st.markdown(f"""
+                    <div class="gc gc-gold">
+                        <div style="font-size:15px;font-weight:700;margin-bottom:12px">📐 Weekly Pivot Levels</div>
+                        <div style="font-size:13px;color:#cbd5e1;line-height:1">
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">R2</span><span style="font-weight:700;color:#ef4444">{idata['w_r2']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">R1</span><span style="font-weight:700;color:#f97316">{idata['w_r1']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">Pivot</span><span style="font-weight:700;color:#f59e0b">{idata['w_pivot']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">S1</span><span style="font-weight:700;color:#10b981">{idata['w_s1']:,.2f}</span></div>
+                            <div style="padding:6px 0;display:flex;justify-content:space-between"><span style="color:#64748b">S2</span><span style="font-weight:700;color:#3b82f6">{idata['w_s2']:,.2f}</span></div>
+                        </div>
+                    </div>
+                    <div class="gc gc-purple" style="margin-top:0">
+                        <div style="font-size:15px;font-weight:700;margin-bottom:12px">📅 Monthly Pivot Levels</div>
+                        <div style="font-size:13px;color:#cbd5e1;line-height:1">
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">R2</span><span style="font-weight:700;color:#ef4444">{idata['m_r2']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">R1</span><span style="font-weight:700;color:#f97316">{idata['m_r1']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">Pivot</span><span style="font-weight:700;color:#f59e0b">{idata['m_pivot']:,.2f}</span></div>
+                            <div style="padding:6px 0;border-bottom:1px solid rgba(255,255,255,.05);display:flex;justify-content:space-between"><span style="color:#64748b">S1</span><span style="font-weight:700;color:#10b981">{idata['m_s1']:,.2f}</span></div>
+                            <div style="padding:6px 0;display:flex;justify-content:space-between"><span style="color:#64748b">S2</span><span style="font-weight:700;color:#3b82f6">{idata['m_s2']:,.2f}</span></div>
+                        </div>
+                    </div>""", unsafe_allow_html=True)
+
+            # ── TECHNICALS TAB ─────────────────────────────────────────────
+            with itab_tech:
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#38bdf8;margin:8px 0">📈 EMA Structure</div>', unsafe_allow_html=True)
+                ta1, ta2, ta3, ta4 = st.columns(4)
+                for col, (ema, val, span) in zip(
+                    [ta1, ta2, ta3, ta4],
+                    [("EMA9", idata["ema9"], 9), ("EMA21", idata["ema21"], 21),
+                     ("EMA50", idata["ema50"], 50), ("EMA200", idata["ema200"], 200)]
+                ):
+                    above = price > val
+                    with col:
+                        st.markdown(
+                            f'<div class="gc {"gc-green" if above else "gc-red"}" style="text-align:center;padding:16px">'
+                            f'<div class="kpi-label">EMA {span}</div>'
+                            f'<div class="kpi-val" style="color:{"#10b981" if above else "#ef4444"}">{val:,.2f}</div>'
+                            f'<div style="font-size:11px;margin-top:6px;color:{"#10b981" if above else "#ef4444"}">{"▲ Above" if above else "▼ Below"}</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#38bdf8;margin:16px 0 8px">📊 Bollinger Bands</div>', unsafe_allow_html=True)
+                bb1, bb2, bb3 = st.columns(3)
+                for col, (lab, val, vc) in zip(
+                    [bb1, bb2, bb3],
+                    [("Upper Band", idata["bb_upper"], "#ef4444"),
+                     ("Mid Band (20MA)", idata["bb_mid"], "#f59e0b"),
+                     ("Lower Band", idata["bb_lower"], "#10b981")],
+                ):
+                    with col:
+                        st.markdown(kpi(lab, f"{val:,.2f}", vc), unsafe_allow_html=True)
+
+                bb_pct = round((price - idata["bb_lower"]) / max(idata["bb_upper"] - idata["bb_lower"], 1) * 100, 1)
+                st.markdown(f'<div class="lc lc-blue" style="margin-top:8px;font-size:12px">BB %B: <b>{bb_pct}%</b> {"(Extended — above 80%)" if bb_pct > 80 else "(Oversold zone)" if bb_pct < 20 else "(Normal range)"}</div>', unsafe_allow_html=True)
+
+            # ── GANN TAB ───────────────────────────────────────────────────
+            with itab_gann:
+                with st.spinner("Computing Gann analysis from 10-year history..."):
+                    gd = compute_index_gann(yf_sym, price, idata["hist"])
+
+                confluence = gd["confluence"]
+                conf_c = "#10b981" if confluence >= 4 else "#f59e0b" if confluence >= 3 else "#ef4444"
+                tier_lbl = "🔥 TIER 1-2 HIGH" if confluence >= 4 else "⚡ TIER 3 MODERATE" if confluence >= 3 else "⏳ LOW / WAIT"
+
+                # ── Step 1: Anchor ────────────────────────────────────────
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:8px 0">⚓ Step 1: Significant Anchor (Major Swing Low)</div>', unsafe_allow_html=True)
+                ac1, ac2, ac3, ac4 = st.columns(4)
+                for col, (lab, val, vc) in zip(
+                    [ac1,ac2,ac3,ac4],
+                    [("Anchor Low", f"{gd['anchor_low']:,.2f}", "#10b981"),
+                     ("Anchor Date", str(gd["anchor_low_date"]), "#f59e0b"),
+                     ("Days from Low", str(gd["days_from_low"]), "#38bdf8"),
+                     ("Scale (pts/day)", f"{gd['scale']:.4f}", "#8b5cf6")],
+                ):
+                    with col:
+                        st.markdown(kpi(lab, val, vc), unsafe_allow_html=True)
+
+                # ── Step 2: Gann Angles ───────────────────────────────────
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">📐 Step 2: Calibrated Gann Angles</div>', unsafe_allow_html=True)
+                ga1, ga2 = st.columns([3, 1])
+                with ga1:
+                    st.dataframe(
+                        pd.DataFrame([
+                            ["4×1", f"{gd['angle_4x1']:,.2f}", "4× scale — Very Strong Bull", "✅ Above" if price >= gd["angle_4x1"] else "Below"],
+                            ["2×1", f"{gd['angle_2x1']:,.2f}", "2× scale — Strong Bull", "✅ Above" if price >= gd["angle_2x1"] else "Below"],
+                            ["1×1", f"{gd['angle_1x1']:,.2f}", "1× scale — Master angle", "✅ Above" if price >= gd["angle_1x1"] else "Below"],
+                            ["1×2", f"{gd['angle_1x2']:,.2f}", "0.5× scale — Caution", "✅ Above" if price >= gd["angle_1x2"] else "Below"],
+                            ["1×4", f"{gd['angle_1x4']:,.2f}", "0.25× scale — Bear", "✅ Above" if price >= gd["angle_1x4"] else "Below"],
+                        ], columns=["Angle", "Level", "Description", "Status"]),
+                        use_container_width=True, hide_index=True,
+                    )
+                with ga2:
+                    st.markdown(
+                        f'<div class="gc gc-gold" style="text-align:center">'
+                        f'<div class="kpi-label">Current Zone</div>'
+                        f'<div style="font-size:12px;font-weight:800;color:{gd["angle_color"]};margin:8px 0;line-height:1.4">{gd["angle_label"]}</div>'
+                        f'<div style="color:#475569;font-size:11px">1×1 dev: {gd["price_vs_1x1"]:+.1f}%</div></div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Step 3: Square of Nine ────────────────────────────────
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">🌀 Step 3: Square of Nine Levels</div>', unsafe_allow_html=True)
+                sq_cols = st.columns(4)
+                sq9_display = [("S2 (SL)", gd["sq9_s2"][1], "#ef4444"),
+                               ("S1 Support", gd["sq9_s1"][1], "#f97316"),
+                               ("R1 Target 1", gd["sq9_r1"][1], "#10b981"),
+                               ("R2 Target 2", gd["sq9_r2"][1], "#3b82f6")]
+                for col, (lab, val, vc) in zip(sq_cols, sq9_display):
+                    with col:
+                        diff_pct = round((val - price) / price * 100, 1)
+                        st.markdown(
+                            f'<div class="gc" style="text-align:center;border-color:{vc}33">'
+                            f'<div class="kpi-label">{lab}</div>'
+                            f'<div class="kpi-val" style="color:{vc}">{val:,.2f}</div>'
+                            f'<div style="font-size:11px;color:#475569;margin-top:4px">{diff_pct:+.1f}% from CMP</div>'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown(
+                    f'<div class="lc lc-cyan" style="font-size:12px;margin-top:4px">'
+                    f'Sq9 Root: <b>{gd["sq9_root"]}</b> · '
+                    f'Nearest Sq9 level: <b>{gd["nearest_sq9_price"]:,.2f}</b> · '
+                    f'Deviation: <b>{gd["price_sq9_dev"]:.2f}%</b>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+
+                # ── Step 4: Time Cycles ───────────────────────────────────
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">⏱️ Step 4: Gann Time Cycles</div>', unsafe_allow_html=True)
+                cd = gd["cycle_details"]
+                tc1, tc2 = st.columns(2)
+                with tc1:
+                    tool_html = "".join([
+                        f'<div class="lc {"lc-green" if active else "lc-red"}" style="font-size:12px;margin-bottom:4px">'
+                        f'{"✅" if active else "⚪"} <b>{tool}</b> — {detail}</div>'
+                        for tool, active, detail in [
+                            ("Natural Squares", cd["tool1_active"], f"Next: {cd['next_sq_date'].strftime('%d %b %Y')} ({cd['days_to_sq']}d away)"),
+                            ("Gann Divisions", cd["tool2_active"], f"Nearest div: {cd['nearest_div']}d → {cd['next_div_date'].strftime('%d %b %Y')}"),
+                            ("Yearly Anniversary", cd["tool3_active"], f"Next: {cd['next_anniv_date'].strftime('%d %b %Y')}"),
+                        ]
+                    ])
+                    st.markdown(
+                        f'<div class="gc gc-cyan"><div style="font-weight:700;color:#06b6d4;margin-bottom:8px">3-Tool Time Analysis</div>'
+                        f'{tool_html}</div>',
+                        unsafe_allow_html=True,
+                    )
+                with tc2:
+                    st.markdown('<b style="font-size:12px;color:#94a3b8">Upcoming Gann Time Units:</b>', unsafe_allow_html=True)
+                    for t, fd, da in gd["gann_future"][:4]:
+                        cls = "lc-green" if da <= 10 else "lc-gold" if da <= 30 else "lc-blue"
+                        tag = ' <b style="color:#10b981">◀ NEAR!</b>' if da <= 10 else ""
+                        st.markdown(
+                            f'<div class="lc {cls}" style="font-size:12px;margin-bottom:4px">'
+                            f'<b style="color:#f59e0b">{t}d</b> → {fd.strftime("%d %b %Y")} <span style="color:#475569">({da}d away)</span>{tag}</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                # ── Step 5: Price-Time Squaring ───────────────────────────
+                sq_col = "#10b981" if gd["is_squared"] else "#f59e0b"
+                st.markdown(
+                    f"""<div class="gc {'gc-green' if gd['is_squared'] else 'gc-gold'}">
+                    <div style="color:#f59e0b;font-weight:700;margin-bottom:6px">⚖️ Step 5: Price Squared with Time (Scale-Corrected)</div>
+                    <div style="font-size:13px;color:#94a3b8;line-height:2">
+                    Price {price:,.2f} · Days from low {gd['days_from_low']} · Scale {gd['scale']}<br>
+                    Scaled time = {gd['days_from_low']} × {gd['scale']} = <b style="color:#f59e0b">{gd['scaled_time']:,.2f}</b><br>
+                    Deviation: <b style="color:{sq_col}">{gd['squaring_pct']}%</b> {"✅ SQUARED (<3%)" if gd['is_squared'] else "⚠️ Not squared (>3%)"}
+                    </div></div>""",
+                    unsafe_allow_html=True,
+                )
+
+                # ── Step 6: Gann Chart ────────────────────────────────────
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 8px">📊 Scaled Gann Chart</div>', unsafe_allow_html=True)
+                st.caption("1 unit time = 1 unit price · Angles visually correct at this scale")
+                gann_fig = _build_index_gann_chart(gd["hist"], gd, price, ilabel)
+                if gann_fig:
+                    st.plotly_chart(gann_fig, use_container_width=True)
+                else:
+                    st.info("Chart unavailable — insufficient history data.")
+
+                # ── Step 7: Final Confluence ──────────────────────────────
+                cf1, cf2 = st.columns([1, 2])
+                with cf1:
+                    st.markdown(
+                        f'<div class="gc" style="text-align:center"><div class="kpi-label">🎯 Confluence Score</div>'
+                        f'<div style="font-size:64px;font-weight:900;font-family:JetBrains Mono,monospace;color:{conf_c}">{confluence}/5</div>'
+                        f'{pb(confluence, 5, conf_c)}'
+                        f'<div style="color:{conf_c};font-weight:700">{tier_lbl}</div></div>',
+                        unsafe_allow_html=True,
+                    )
+                with cf2:
+                    r_html = "".join([
+                        f'<div class="lc lc-{"green" if any(x in r for x in ["🔥","✅"]) else "gold" if "⚡" in r else "blue"}" '
+                        f'style="font-size:12px;margin-bottom:5px">{r}</div>'
+                        for r in gd["reasons"]
+                    ])
+                    st.markdown(
+                        f'<div class="gc gc-gold"><div style="color:#f59e0b;font-weight:700;margin-bottom:8px">Confluence Breakdown:</div>{r_html}</div>',
+                        unsafe_allow_html=True,
+                    )
+
+                # ── Final Verdict for Index ───────────────────────────────
+                gv_rr  = round((gd["gann_t1"] - price) / max(price - gd["gann_sl"], 0.01), 2)
+                gv_cls = "vb-buy" if confluence >= 4 else "vb-caution" if confluence >= 3 else "vb-avoid"
+                gv_txt = ("STRONG INDEX SETUP" if confluence >= 4
+                          else "WATCH — PARTIAL CONFLUENCE" if confluence >= 3
+                          else "WAIT — CYCLES NOT ALIGNED")
+                st.markdown(
+                    f"""<div class="gc gc-gold"><div class="verdict-banner {gv_cls}" style="margin-bottom:14px">🔶 {gv_txt} · {ilabel}</div>
+                    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px">
+                        <div class="lc lc-blue" style="font-size:12px">⚓ Anchor Low<br>{gd['anchor_low']:,.2f} · {gd['anchor_low_date'].strftime('%d %b %Y')}</div>
+                        <div class="lc lc-gold" style="font-size:12px">📐 Angle Zone<br>{gd['angle_label']}</div>
+                        <div class="lc {'lc-green' if gd['is_squared'] else 'lc-gold'}" style="font-size:12px">⚖️ P=T<br>{'✅ Squared' if gd['is_squared'] else f'⚠️ {gd["squaring_pct"]}% off'}</div>
+                        <div class="lc lc-green"  style="font-size:12px">🎯 T1 (Sq9 R1)<br>{gd['gann_t1']:,.2f}</div>
+                        <div class="lc lc-blue"   style="font-size:12px">🎯 T2 (Sq9 R2)<br>{gd['gann_t2']:,.2f}</div>
+                        <div class="lc lc-red"    style="font-size:12px">🛑 SL (Sq9 S2)<br>{gd['gann_sl']:,.2f}</div>
+                    </div>
+                    <div style="font-size:12px;color:#64748b">
+                    R:R 1:{gv_rr} {"✅" if gv_rr>=2.0 else "⚠️"} ·
+                    Sq9 root {gd['sq9_root']} ·
+                    Scale {gd['scale']} pts/day ·
+                    Range target {gd['range_sq_target']:,.2f}
+                    </div></div>""",
+                    unsafe_allow_html=True,
+                )
+
+    else:
+        # Landing state
+        st.markdown("""
+        <div style="padding:32px 0">
+        <div style="text-align:center;color:#475569;margin-bottom:32px">Select an index above and click <b style="color:#f59e0b">Analyze Index</b></div>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+        """, unsafe_allow_html=True)
+
+        for name, cfg in list(INDEX_MAP.items())[:6]:
+            st.markdown(
+                f'<div class="gc" style="border-color:{cfg["color"]}33;text-align:center;padding:20px">'
+                f'<div style="font-size:1.2rem;font-weight:800;color:{cfg["color"]};margin-bottom:4px">{cfg["label"]}</div>'
+                f'<div style="font-size:11px;color:#475569">Select above to analyze</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('</div></div>', unsafe_allow_html=True)
