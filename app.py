@@ -2577,7 +2577,7 @@ with tab_index:
         st.session_state["idx_hist"]       = _hist
         st.session_state["idx_anchors"]    = _anchors
         st.session_state["idx_loaded_for"] = selected_index
-        st.session_state["idx_tf"]         = timeframe_opt
+        st.session_state["idx_timeframe_stored"] = timeframe_opt
 
     # ── Read from session_state (works on every rerun, including anchor change) ──
     idata         = st.session_state.get("idx_idata")
