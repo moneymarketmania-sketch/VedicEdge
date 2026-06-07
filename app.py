@@ -657,17 +657,34 @@ def _time_cycle_confluence(anchor_low_date, today):
         except Exception:
             t3_upcoming_date = today + timedelta(days=365)
 
+    # ── Tool 4 (NEW): Seasonal / Equinox-Solstice cycle dates ────────────────
+    # Gann considered seasonal change dates as high-probability turn windows
+    # Approx fixed dates: Mar 20, Jun 21, Sep 22, Dec 21
+    seasonal_dates_this_year = [
+        date(today.year, 3, 20), date(today.year, 6, 21),
+        date(today.year, 9, 22), date(today.year, 12, 21),
+        date(today.year + 1, 3, 20), date(today.year + 1, 6, 21),
+    ]
+    tool4_active = any(abs((today - sd).days) <= window for sd in seasonal_dates_this_year)
+    t4_upcoming  = min(
+        [sd for sd in seasonal_dates_this_year if sd >= today - timedelta(days=window)],
+        default=seasonal_dates_this_year[-1],
+        key=lambda d: abs((d - today).days)
+    )
+
     # ── FIX 2: Same-window check ─────────────────────────────────────────────
     # Collect next upcoming date for each active tool
     upcoming = {
-        "sq":    t1_upcoming,
-        "div":   t2_next_date,
-        "anniv": t3_upcoming_date,
+        "sq":      t1_upcoming,
+        "div":     t2_next_date,
+        "anniv":   t3_upcoming_date,
+        "seasonal": t4_upcoming,
     }
     active_flags = {
-        "sq":    tool1_active,
-        "div":   tool2_active,
-        "anniv": tool3_active,
+        "sq":      tool1_active,
+        "div":     tool2_active,
+        "anniv":   tool3_active,
+        "seasonal": tool4_active,
     }
     # Check pairs — do they land within ±window days of EACH OTHER?
     same_window_pairs = 0
@@ -683,13 +700,13 @@ def _time_cycle_confluence(anchor_low_date, today):
                     pair_labels.append(f"{k1}+{k2} within {delta}d")
 
     # Active tools count (same-window pairs determine quality)
-    # 3 tools all same window = strong; 2 pairs same window = moderate; else weak
-    if same_window_pairs >= 2 or (same_window_pairs == 1 and sum(active_flags.values()) == 3):
+    total_active = sum(active_flags.values())
+    if same_window_pairs >= 3 or (same_window_pairs >= 2 and total_active >= 3):
         active_tools = 3
-    elif same_window_pairs == 1:
+    elif same_window_pairs >= 1 and total_active >= 2:
         active_tools = 2
-    elif sum(active_flags.values()) >= 2:
-        active_tools = 1   # active but not same window — weak
+    elif total_active >= 2:
+        active_tools = 1
     else:
         active_tools = 0
 
@@ -697,6 +714,7 @@ def _time_cycle_confluence(anchor_low_date, today):
         "tool1_active":   tool1_active,
         "tool2_active":   tool2_active,
         "tool3_active":   tool3_active,
+        "tool4_active":   tool4_active,
         "active_tools":   active_tools,
         "same_window_pairs": same_window_pairs,
         "pair_labels":    pair_labels,
@@ -707,6 +725,7 @@ def _time_cycle_confluence(anchor_low_date, today):
         "next_sq_date":   t1_upcoming,
         "next_div_date":  t2_next_date,
         "next_anniv_date": t3_upcoming_date,
+        "next_seasonal_date": t4_upcoming,
         "days_from_low":  days_from_low,
     }
     return active_tools, details
@@ -1289,60 +1308,130 @@ def _get_all_anchors(hist):
 
 
 # ── Core Gann computation (anchor-agnostic) ───────────────────────────────────
-def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, hist_full):
+def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high,
+                               hist_full, anchor_high_date=None):
     """
     All Gann calculations given a specific anchor.
-    Returns complete gann dict for that anchor.
+    FIX 1: Scale uses days_low_to_high (not days_low_to_today).
+    FIX 2: Bearish descending angles from anchor_high.
+    FIX 3: All 3 squaring methods (price, low, range).
+    FIX 4: Seasonal cycle dates added to time engine.
     """
-    today = datetime.now().date()
-    days_from_low  = max((today - anchor_low_date).days, 1)
-    hl_range       = round(anchor_high - anchor_low, 2)
-    price_range    = max(hl_range, 1.0)
-    scale          = round(price_range / days_from_low, 6)
+    today         = datetime.now().date()
+    days_from_low = max((today - anchor_low_date).days, 1)
+    hl_range      = round(anchor_high - anchor_low, 2)
 
-    # ── Angles ──────────────────────────────────────────────────────────────
-    def angle_at(days, ratio):
+    # ── FIX 1: Correct scale denominator ────────────────────────────────────
+    # Scale = price range / time of the swing (low→high), NOT low→today
+    if anchor_high_date is not None:
+        days_low_to_high = max((anchor_high_date - anchor_low_date).days, 1)
+    else:
+        # Estimate: find the high date in history if not passed
+        if hist_full is not None and not hist_full.empty:
+            anchor_dt  = pd.Timestamp(anchor_low_date)
+            after_low  = hist_full[hist_full.index >= anchor_dt]
+            if not after_low.empty:
+                high_idx         = after_low["High"].idxmax()
+                anchor_high_date = high_idx.date() if hasattr(high_idx, "date") else high_idx.to_pydatetime().date()
+                days_low_to_high = max((anchor_high_date - anchor_low_date).days, 1)
+            else:
+                days_low_to_high = days_from_low
+        else:
+            days_low_to_high = days_from_low
+
+    scale = round(hl_range / max(days_low_to_high, 1), 6)
+
+    # ── BULLISH angles — ascending from anchor_low ────────────────────────
+    def bull_angle_at(days, ratio):
         return round(anchor_low + days * scale * ratio, 2)
 
-    angle_4x1 = angle_at(days_from_low, 4.0)
-    angle_2x1 = angle_at(days_from_low, 2.0)
-    angle_1x1 = angle_at(days_from_low, 1.0)
-    angle_1x2 = angle_at(days_from_low, 0.5)
-    angle_1x4 = angle_at(days_from_low, 0.25)
-    angle_1x8 = angle_at(days_from_low, 0.125)
-    angle_8x1 = angle_at(days_from_low, 8.0)
+    b_8x1 = bull_angle_at(days_from_low, 8.0)
+    b_4x1 = bull_angle_at(days_from_low, 4.0)
+    b_2x1 = bull_angle_at(days_from_low, 2.0)
+    b_1x1 = bull_angle_at(days_from_low, 1.0)
+    b_1x2 = bull_angle_at(days_from_low, 0.5)
+    b_1x4 = bull_angle_at(days_from_low, 0.25)
+    b_1x8 = bull_angle_at(days_from_low, 0.125)
 
-    angles_dict = {
-        "8×1": angle_8x1, "4×1": angle_4x1, "2×1": angle_2x1,
-        "1×1": angle_1x1, "1×2": angle_1x2, "1×4": angle_1x4, "1×8": angle_1x8
+    # ── FIX 2: BEARISH angles — descending from anchor_high ──────────────
+    # Gann: draw angles DOWN from significant high at same scale
+    # bear_1x1 at day D = anchor_high - (days_from_high) * scale * ratio
+    if anchor_high_date is not None:
+        days_from_high = max((today - anchor_high_date).days, 1)
+    else:
+        days_from_high = max(days_from_low - days_low_to_high, 1)
+
+    def bear_angle_at(days, ratio):
+        return round(anchor_high - days * scale * ratio, 2)
+
+    bear_8x1 = bear_angle_at(days_from_high, 8.0)
+    bear_4x1 = bear_angle_at(days_from_high, 4.0)
+    bear_2x1 = bear_angle_at(days_from_high, 2.0)
+    bear_1x1 = bear_angle_at(days_from_high, 1.0)
+    bear_1x2 = bear_angle_at(days_from_high, 0.5)
+    bear_1x4 = bear_angle_at(days_from_high, 0.25)
+    bear_1x8 = bear_angle_at(days_from_high, 0.125)
+
+    # ── Angle zone & closest angle (bullish fan) ──────────────────────────
+    bull_angles = {
+        "8×1": b_8x1, "4×1": b_4x1, "2×1": b_2x1,
+        "1×1": b_1x1, "1×2": b_1x2, "1×4": b_1x4, "1×8": b_1x8
     }
-    closest_angle = min(angles_dict, key=lambda k: abs(angles_dict[k] - price))
-    price_vs_1x1  = round((price - angle_1x1) / max(angle_1x1, 1) * 100, 2)
+    bear_angles = {
+        "Bear 8×1": bear_8x1, "Bear 4×1": bear_4x1, "Bear 2×1": bear_2x1,
+        "Bear 1×1": bear_1x1, "Bear 1×2": bear_1x2, "Bear 1×4": bear_1x4,
+        "Bear 1×8": bear_1x8
+    }
+    all_angles = {**bull_angles, **bear_angles}
+    closest_angle = min(bull_angles, key=lambda k: abs(bull_angles[k] - price))
+    price_vs_1x1  = round((price - b_1x1) / max(b_1x1, 1) * 100, 2)
 
-    if   price >= angle_2x1: angle_label="Above 2×1 (Very Strong Bull)"; angle_color="#10b981"
-    elif price >= angle_1x1: angle_label="1×1–2×1 (Bull Zone)";          angle_color="#10b981"
-    elif price >= angle_1x2: angle_label="1×2–1×1 (Caution)";            angle_color="#f59e0b"
-    else:                    angle_label="Below 1×2 (Bear)";              angle_color="#ef4444"
+    # Market structure based on bullish fan position
+    if   price >= b_2x1:  angle_label="Above 2×1 (Very Strong Bull)"; angle_color="#10b981"
+    elif price >= b_1x1:  angle_label="1×1–2×1 (Bull Zone)";          angle_color="#10b981"
+    elif price >= b_1x2:  angle_label="1×2–1×1 (Caution)";            angle_color="#f59e0b"
+    else:                 angle_label="Below 1×2 (Bear)";              angle_color="#ef4444"
+
+    # Bearish structure: is price below key bear angles?
+    bear_zone = price < bear_1x1  # below bear 1×1 = bearish pressure from high
 
     # ── Square of Nine ───────────────────────────────────────────────────────
     sq9_all = _sq9_levels(price)
     sq9_sup = [(l,p2,s) for l,p2,s in sq9_all if p2 < price]
     sq9_res = [(l,p2,s) for l,p2,s in sq9_all if p2 > price]
-    sq9_s1  = sq9_sup[-1]  if sq9_sup              else ("—", price, "—")
-    sq9_s2  = sq9_sup[-2]  if len(sq9_sup) >= 2    else sq9_s1
-    sq9_r1  = sq9_res[0]   if sq9_res              else ("—", price, "—")
-    sq9_r2  = sq9_res[1]   if len(sq9_res) >= 2    else sq9_r1
+    sq9_s1  = sq9_sup[-1]  if sq9_sup           else ("—", price, "—")
+    sq9_s2  = sq9_sup[-2]  if len(sq9_sup) >= 2 else sq9_s1
+    sq9_r1  = sq9_res[0]   if sq9_res           else ("—", price, "—")
+    sq9_r2  = sq9_res[1]   if len(sq9_res) >= 2 else sq9_r1
 
-    nearest_sq9 = min([p2 for _,p2,_ in sq9_all], key=lambda x: abs(x-price))
+    nearest_sq9   = min([p2 for _,p2,_ in sq9_all], key=lambda x: abs(x-price))
     price_sq9_dev = abs(nearest_sq9 - price) / price * 100
 
-    # ── Time cycles ──────────────────────────────────────────────────────────
+    # ── FIX 4: Time cycles (now includes seasonal dates) ─────────────────
     active_tools, cycle_details = _time_cycle_confluence(anchor_low_date, today)
 
-    # ── Price-Time squaring ──────────────────────────────────────────────────
-    scaled_time  = round(days_from_low * scale, 2)
-    squaring_pct = round(abs(price - scaled_time) / max(price, 1) * 100, 2)
-    is_squared   = squaring_pct < 3.0
+    # ── FIX 3: All 3 Price-Time squaring methods ──────────────────────────
+    # Method A: Scale-corrected 1×1 angle squaring (original)
+    scaled_time_A = round(days_from_low * scale, 2)
+    sq_pct_A      = round(abs(price - scaled_time_A) / max(price, 1) * 100, 2)
+
+    # Method B: Square the LOW — days from low equals anchor_low value
+    #   Gann: watch when days_from_low == anchor_low (same units, so normalise)
+    anchor_low_units = anchor_low / scale if scale > 0 else anchor_low
+    sq_pct_B = round(abs(days_from_low - anchor_low_units) / max(anchor_low_units, 1) * 100, 2)
+
+    # Method C: Square the RANGE — √range as time unit
+    range_sqrt      = round(math.sqrt(max(hl_range, 1)), 4)
+    range_sq_target = round((math.ceil(range_sqrt) + 1) ** 2, 2)
+    # Time elapsed as fraction of range square
+    sq_pct_C = round(abs(days_from_low - hl_range / scale) / max(hl_range / max(scale,0.0001), 1) * 100, 2)
+
+    # Combined squaring — any method within 3% counts
+    is_squared    = sq_pct_A < 3.0
+    is_sq_B       = sq_pct_B < 3.0
+    is_sq_C       = sq_pct_C < 3.0
+    any_squared   = is_squared or is_sq_B or is_sq_C
+    squaring_pct  = min(sq_pct_A, sq_pct_B, sq_pct_C)  # best of three
 
     # ── Confluence score ─────────────────────────────────────────────────────
     at_sq9_tight    = price_sq9_dev <= 0.5
@@ -1366,8 +1455,10 @@ def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, h
         confluence=1; reasons.append("⚪ No meaningful confluence — between levels/cycles")
 
     reasons.append(f"   Sq9 nearest {nearest_sq9:,.2f} · dev {price_sq9_dev:.2f}%")
-    reasons.append(f"   1×1 angle {angle_1x1:,.2f} · dev {price_vs_1x1:+.2f}%")
+    reasons.append(f"   1×1 angle {b_1x1:,.2f} · dev {price_vs_1x1:+.2f}%")
     reasons.append(f"   Time tools: {active_tools}/3 · Pairs: {cycle_details['same_window_pairs']}")
+    if any_squared:
+        reasons.append(f"   ⚖️ Price squared with time: A={sq_pct_A:.1f}% B={sq_pct_B:.1f}% C={sq_pct_C:.1f}%")
 
     # ── Future Gann time unit dates ──────────────────────────────────────────
     gann_time_units = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
@@ -1387,18 +1478,23 @@ def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, h
         if sd >= today:
             sq_dates.append((d, sd, (sd-today).days, i))
 
-    range_sqrt      = round(math.sqrt(max(hl_range, 1)), 4)
-    range_sq_target = round((math.ceil(range_sqrt)+1)**2, 2)
-
     return dict(
         today=today,
         anchor_low=anchor_low, anchor_low_date=anchor_low_date,
-        anchor_high=anchor_high,
-        days_from_low=days_from_low, hl_range=hl_range, scale=scale,
-        # Angles
-        angle_8x1=angle_8x1, angle_4x1=angle_4x1, angle_2x1=angle_2x1,
-        angle_1x1=angle_1x1, angle_1x2=angle_1x2, angle_1x4=angle_1x4, angle_1x8=angle_1x8,
-        angles_dict=angles_dict, closest_angle=closest_angle, price_vs_1x1=price_vs_1x1,
+        anchor_high=anchor_high, anchor_high_date=anchor_high_date,
+        days_from_low=days_from_low, days_from_high=days_from_high,
+        days_low_to_high=days_low_to_high,
+        hl_range=hl_range, scale=scale,
+        # Bullish angles
+        angle_8x1=b_8x1, angle_4x1=b_4x1, angle_2x1=b_2x1,
+        angle_1x1=b_1x1, angle_1x2=b_1x2, angle_1x4=b_1x4, angle_1x8=b_1x8,
+        angles_dict=bull_angles,
+        # Bearish angles
+        bear_8x1=bear_8x1, bear_4x1=bear_4x1, bear_2x1=bear_2x1,
+        bear_1x1=bear_1x1, bear_1x2=bear_1x2, bear_1x4=bear_1x4, bear_1x8=bear_1x8,
+        bear_angles=bear_angles, bear_zone=bear_zone,
+        # Zone
+        closest_angle=closest_angle, price_vs_1x1=price_vs_1x1,
         angle_label=angle_label, angle_color=angle_color,
         # Sq9
         sq9_root=round(math.sqrt(price), 6),
@@ -1409,8 +1505,11 @@ def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, h
         # Time
         active_tools=active_tools, cycle_details=cycle_details,
         gann_future=gann_future, sq_dates=sq_dates,
-        # Squaring
-        scaled_time=scaled_time, squaring_pct=squaring_pct, is_squared=is_squared,
+        # Squaring (all 3 methods)
+        scaled_time=scaled_time_A, squaring_pct=squaring_pct,
+        sq_pct_A=sq_pct_A, sq_pct_B=sq_pct_B, sq_pct_C=sq_pct_C,
+        is_squared=is_squared, is_sq_B=is_sq_B, is_sq_C=is_sq_C,
+        any_squared=any_squared,
         range_sqrt=range_sqrt, range_sq_target=range_sq_target,
         # Confluence
         confluence=confluence, reasons=reasons,
@@ -1422,124 +1521,249 @@ def _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, h
 # ── Gann Forecast Table (forward-looking) ─────────────────────────────────────
 def _build_forecast_table(price, gd, timeframe, days_forward):
     """
-    For each upcoming Gann time event in the next `days_forward` days,
-    compute the price projection for EVERY angle and check Sq9 confluence.
-
-    timeframe: "intraday" uses tighter scale; "swing" uses current scale;
-    "positional" projects further but flags uncertainty.
-
-    Returns list of dicts for each date.
+    For each upcoming Gann time event, compute BOTH bullish and bearish projections.
+    Bull: ascending angles from anchor_low
+    Bear: descending angles from anchor_high
+    Returns list of dicts — each row has a direction (Bull/Bear) and a watch price.
     """
-    today       = gd["today"]
-    anchor_low  = gd["anchor_low"]
-    anchor_date = gd["anchor_low_date"]
-    scale       = gd["scale"]
-    sq9_root    = gd["sq9_root"]
+    today            = gd["today"]
+    anchor_low       = gd["anchor_low"]
+    anchor_high      = gd["anchor_high"]
+    anchor_low_date  = gd["anchor_low_date"]
+    anchor_high_date = gd.get("anchor_high_date")
+    scale            = gd["scale"]
 
-    GANN_UNITS = [45, 90, 135, 144, 180, 225, 270, 315, 360, 405, 450, 495, 504, 540, 630, 720]
-    NATURAL_SQS = [n*n for n in range(1, 50)]
+    GANN_UNITS  = [30, 45, 90, 120, 135, 144, 180, 225, 270, 315, 360, 405, 450, 495, 504, 540, 630, 720]
+    NATURAL_SQS = [n*n for n in range(1, 60)]
 
-    # Collect all significant future dates within window
+    # Seasonal dates for current + next year
+    seasonal_fixed = []
+    for yr in [today.year, today.year + 1]:
+        for m, d in [(3,20),(6,21),(9,22),(12,21)]:
+            try:
+                seasonal_fixed.append(date(yr, m, d))
+            except Exception:
+                pass
+
+    # ── Collect all significant future dates ─────────────────────────────────
     event_dates = {}  # date -> list of event labels
 
-    base_days = (today - anchor_date).days
-
+    # From anchor LOW (bullish time cycles)
     for unit in GANN_UNITS:
         mult = 1
         while True:
-            d = unit * mult
-            fd = anchor_date + timedelta(days=d)
-            days_away = (fd - today).days
-            if days_away > days_forward:
-                break
-            if days_away >= 0:
-                key = fd
-                event_dates.setdefault(key, []).append(f"Gann {unit}×{mult}d ({d}d)")
+            d  = unit * mult
+            fd = anchor_low_date + timedelta(days=d)
+            da = (fd - today).days
+            if da > days_forward: break
+            if da >= 0:
+                event_dates.setdefault(fd, []).append(f"Bull Gann {unit}d×{mult} (from low)")
             mult += 1
 
     for sq in NATURAL_SQS:
-        fd = anchor_date + timedelta(days=sq)
-        days_away = (fd - today).days
-        if 0 <= days_away <= days_forward:
+        fd = anchor_low_date + timedelta(days=sq)
+        da = (fd - today).days
+        if 0 <= da <= days_forward:
             n = int(math.sqrt(sq))
-            event_dates.setdefault(fd, []).append(f"Nat.Sq {n}²={sq}d")
+            event_dates.setdefault(fd, []).append(f"Bull Nat.Sq {n}²={sq}d (from low)")
 
-    # Yearly anniversaries
-    for yr in range(1, 20):
+    # From anchor HIGH (bearish time cycles)
+    if anchor_high_date is not None:
+        for unit in GANN_UNITS:
+            mult = 1
+            while True:
+                d  = unit * mult
+                fd = anchor_high_date + timedelta(days=d)
+                da = (fd - today).days
+                if da > days_forward: break
+                if da >= 0:
+                    event_dates.setdefault(fd, []).append(f"Bear Gann {unit}d×{mult} (from high)")
+                mult += 1
+
+        for sq in NATURAL_SQS:
+            fd = anchor_high_date + timedelta(days=sq)
+            da = (fd - today).days
+            if 0 <= da <= days_forward:
+                n = int(math.sqrt(sq))
+                event_dates.setdefault(fd, []).append(f"Bear Nat.Sq {n}²={sq}d (from high)")
+
+    # Seasonal dates (direction-neutral — mark as potential turn)
+    for sd in seasonal_fixed:
+        da = (sd - today).days
+        if 0 <= da <= days_forward:
+            event_dates.setdefault(sd, []).append("🌿 Seasonal (equinox/solstice)")
+
+    # Yearly anniversaries from low
+    for yr in range(1, 10):
         try:
-            anniv = anchor_date.replace(year=anchor_date.year + yr)
-            days_away = (anniv - today).days
-            if 0 <= days_away <= days_forward:
-                event_dates.setdefault(anniv, []).append(f"{yr}yr anniversary")
+            anniv = anchor_low_date.replace(year=anchor_low_date.year + yr)
+            da    = (anniv - today).days
+            if 0 <= da <= days_forward:
+                event_dates.setdefault(anniv, []).append(f"{yr}yr anniversary of anchor low")
         except Exception:
             pass
 
     rows = []
     for event_date in sorted(event_dates.keys()):
-        days_from_anchor = (event_date - anchor_date).days
+        days_from_low_on_date  = (event_date - anchor_low_date).days
+        days_from_high_on_date = (event_date - anchor_high_date).days if anchor_high_date else 0
         days_away = (event_date - today).days
-        events = event_dates[event_date]
+        events    = event_dates[event_date]
 
-        # Angle projections at that future date
-        proj = {}
+        # ── Bullish projections (ascending from low) ────────────────────────
+        bull_proj = {}
         for ratio, name in [(4.0,"4×1"),(2.0,"2×1"),(1.0,"1×1"),(0.5,"1×2"),(0.25,"1×4")]:
-            proj[name] = round(anchor_low + days_from_anchor * scale * ratio, 2)
+            bull_proj[name] = round(anchor_low + days_from_low_on_date * scale * ratio, 2)
 
-        # Sq9 levels near the 1×1 projection (the "expected" price)
-        ref_price = proj["1×1"]
-        ref_root  = math.sqrt(max(ref_price, 1))
-        sq9_near  = []
-        for offset in [-2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2]:
-            nr = ref_root + offset
-            if nr > 0:
-                sq9_near.append(round(nr**2, 2))
+        # ── Bearish projections (descending from high) ──────────────────────
+        bear_proj = {}
+        if anchor_high_date is not None and days_from_high_on_date > 0:
+            for ratio, name in [(4.0,"4×1"),(2.0,"2×1"),(1.0,"1×1"),(0.5,"1×2"),(0.25,"1×4")]:
+                bear_proj[name] = round(anchor_high - days_from_high_on_date * scale * ratio, 2)
 
-        # Find closest Sq9 level to 1×1 projection
-        closest_sq9 = min(sq9_near, key=lambda x: abs(x - ref_price))
-        sq9_dev     = abs(closest_sq9 - ref_price) / max(ref_price, 1) * 100
+        # ── For each angle, find closest Sq9 level and score ───────────────
+        def _score_angle_sq9(ref_price, n_events, direction):
+            """Return (best_sq9, best_dev, conf, conf_score)."""
+            ref_root = math.sqrt(max(ref_price, 1))
+            sq9_near = []
+            for offset in [-2.5, -2, -1.5, -1, -0.5, 0, 0.5, 1, 1.5, 2, 2.5]:
+                nr = ref_root + offset
+                if nr > 0:
+                    sq9_near.append(round(nr**2, 2))
 
-        # Also check 2×1 and 1×2
-        best_angle_name = "1×1"
-        best_dev = sq9_dev
-        for aname in ["2×1", "1×2", "4×1", "1×4"]:
-            ap = proj[aname]
-            cs = min(sq9_near, key=lambda x: abs(x - ap))
-            dev = abs(cs - ap) / max(ap, 1) * 100
-            if dev < best_dev:
-                best_dev = dev; best_angle_name = aname; closest_sq9 = cs; sq9_dev = dev
+            # For bullish: prefer levels ABOVE current price (targets)
+            # For bearish: prefer levels BELOW current price (targets)
+            if direction == "Bull":
+                target_pool = [x for x in sq9_near if x >= price] or sq9_near
+            else:
+                target_pool = [x for x in sq9_near if x <= price] or sq9_near
 
-        best_angle_price = proj[best_angle_name]
+            best_sq9 = min(target_pool, key=lambda x: abs(x - ref_price))
+            best_dev = abs(best_sq9 - ref_price) / max(ref_price, 1) * 100
 
-        # Confidence scoring (rigorous)
+            if   best_dev <= 0.3 and n_events >= 2: conf="🔥 HIGH";     cs=3
+            elif best_dev <= 0.5 and n_events >= 2: conf="🔥 HIGH";     cs=3
+            elif best_dev <= 1.0 and n_events >= 2: conf="⚡ MODERATE"; cs=2
+            elif best_dev <= 0.5 and n_events >= 1: conf="⚡ MODERATE"; cs=2
+            elif best_dev <= 1.5 and n_events >= 1: conf="🔵 LOW";      cs=1
+            else:                                    conf="⚪ WEAK";     cs=0
+            return best_sq9, round(best_dev, 3), conf, cs
+
         n_events = len(events)
-        if   sq9_dev <= 0.3 and n_events >= 2: conf = "🔥 HIGH";     conf_score = 3
-        elif sq9_dev <= 0.5 and n_events >= 2: conf = "🔥 HIGH";     conf_score = 3
-        elif sq9_dev <= 1.0 and n_events >= 2: conf = "⚡ MODERATE"; conf_score = 2
-        elif sq9_dev <= 0.5 and n_events >= 1: conf = "⚡ MODERATE"; conf_score = 2
-        elif sq9_dev <= 1.5 and n_events >= 1: conf = "🔵 LOW";      conf_score = 1
-        else:                                   conf = "⚪ WEAK";     conf_score = 0
+
+        # ── Find best bullish angle (closest to a Sq9 level above price) ───
+        bull_best_name = "1×1"; bull_best_sq9 = price; bull_best_dev = 99; bull_conf = "⚪ WEAK"; bull_cs = 0
+        for aname, ap in bull_proj.items():
+            if ap > price:  # only angles projecting above current price = bullish targets
+                bs9, bdev, bc, bcs = _score_angle_sq9(ap, n_events, "Bull")
+                if bcs > bull_cs or (bcs == bull_cs and bdev < bull_best_dev):
+                    bull_best_name = aname; bull_best_sq9 = bs9
+                    bull_best_dev  = bdev;  bull_conf = bc; bull_cs = bcs
+
+        # ── Find best bearish angle (closest to a Sq9 level below price) ───
+        bear_best_name = "1×1"; bear_best_sq9 = price; bear_best_dev = 99; bear_conf = "⚪ WEAK"; bear_cs = 0
+        if bear_proj:
+            for aname, ap in bear_proj.items():
+                if ap < price:  # only angles projecting below current price = bearish targets
+                    bs9, bdev, bc, bcs = _score_angle_sq9(ap, n_events, "Bear")
+                    if bcs > bear_cs or (bcs == bear_cs and bdev < bear_best_dev):
+                        bear_best_name = aname; bear_best_sq9 = bs9
+                        bear_best_dev  = bdev;  bear_conf = bc; bear_cs = bcs
+
+        # ── Is there a bull-bear angle intersection near this date? ─────────
+        # Intersection = bull 1×1 and bear 1×1 within 1% of each other
+        bull_1x1_here = bull_proj.get("1×1", 0)
+        bear_1x1_here = bear_proj.get("1×1", price * 2) if bear_proj else price * 2
+        intersection  = abs(bull_1x1_here - bear_1x1_here) / max(bull_1x1_here, 1) * 100 <= 1.5
+        intersection_price = round((bull_1x1_here + bear_1x1_here) / 2, 2) if intersection else None
+
+        # ── Determine primary direction for this date ────────────────────────
+        # Based on which events dominate (Bull vs Bear labels in events list)
+        bull_event_count = sum(1 for e in events if "Bull" in e or "anniversary" in e or "Seasonal" in e)
+        bear_event_count = sum(1 for e in events if "Bear" in e)
+        if   intersection:                     primary_dir = "BOTH (Intersection!)"
+        elif bear_event_count > bull_event_count: primary_dir = "Bear"
+        else:                                   primary_dir = "Bull"
+
+        # ── Append row only if at least LOW confidence ──────────────────────
+        max_cs = max(bull_cs, bear_cs, 1 if intersection else 0)
+        if max_cs < 1:
+            continue
 
         rows.append(dict(
             date=event_date,
             days_away=days_away,
             events=" + ".join(events),
             n_events=n_events,
-            proj_4x1=proj["4×1"],
-            proj_2x1=proj["2×1"],
-            proj_1x1=proj["1×1"],
-            proj_1x2=proj["1×2"],
-            proj_1x4=proj["1×4"],
-            best_angle=best_angle_name,
-            best_angle_price=best_angle_price,
-            closest_sq9=closest_sq9,
-            sq9_dev=round(sq9_dev, 3),
-            confidence=conf,
-            conf_score=conf_score,
+            primary_dir=primary_dir,
+            intersection=intersection,
+            intersection_price=intersection_price,
+            # Bull
+            bull_proj_1x1=bull_proj.get("1×1", 0),
+            bull_proj_2x1=bull_proj.get("2×1", 0),
+            bull_best_angle=bull_best_name,
+            bull_watch_price=bull_best_sq9,
+            bull_dev=bull_best_dev,
+            bull_conf=bull_conf,
+            bull_cs=bull_cs,
+            # Bear
+            bear_proj_1x1=bear_proj.get("1×1", 0) if bear_proj else 0,
+            bear_proj_2x1=bear_proj.get("2×1", 0) if bear_proj else 0,
+            bear_best_angle=bear_best_name,
+            bear_watch_price=bear_best_sq9,
+            bear_dev=bear_best_dev,
+            bear_conf=bear_conf,
+            bear_cs=bear_cs,
         ))
 
-    # Sort by date, then put HIGH confidence first within same week
-    rows.sort(key=lambda x: (x["date"], -x["conf_score"]))
+    rows.sort(key=lambda x: (x["date"], -(x["bull_cs"] + x["bear_cs"])))
     return rows
+
+
+def _build_gann_verdict(price, gd, forecast_rows):
+    """
+    The Gann Verdict: 'On date X, price should be at Y — expect a reaction.'
+    Picks the top 3 highest-confidence upcoming dates and builds the statement.
+    This is what Gann actually produced — a specific date + price forecast.
+    """
+    top_rows = sorted(
+        [r for r in forecast_rows if r["bull_cs"] >= 2 or r["bear_cs"] >= 2 or r["intersection"]],
+        key=lambda x: -(x["bull_cs"] + x["bear_cs"] + (2 if x["intersection"] else 0))
+    )[:3]
+
+    verdicts = []
+    for row in top_rows:
+        if row["intersection"] and row["intersection_price"]:
+            watch = row["intersection_price"]
+            dir_lbl = "⚡ BOTH directions possible (angle intersection)"
+            col = "#f59e0b"
+        elif row["bull_cs"] >= row["bear_cs"] and row["bull_watch_price"] > price:
+            watch   = row["bull_watch_price"]
+            dir_lbl = "📈 Bullish reaction expected"
+            col     = "#10b981"
+        elif row["bear_watch_price"] > 0 and row["bear_watch_price"] < price:
+            watch   = row["bear_watch_price"]
+            dir_lbl = "📉 Bearish reaction expected"
+            col     = "#ef4444"
+        else:
+            watch   = row["bull_watch_price"]
+            dir_lbl = "👀 Watch for reaction"
+            col     = "#94a3b8"
+
+        diff_pct = round((watch - price) / price * 100, 2)
+        verdicts.append(dict(
+            date=row["date"],
+            days_away=row["days_away"],
+            watch_price=watch,
+            dir_lbl=dir_lbl,
+            col=col,
+            diff_pct=diff_pct,
+            events=row["events"],
+            bull_cs=row["bull_cs"],
+            bear_cs=row["bear_cs"],
+        ))
+
+    return verdicts
 
 
 # ── Backtest: how accurate have past confluence dates been? ───────────────────
@@ -1678,12 +1902,40 @@ def _build_index_gann_chart(hist, gd, price, index_label, forecast_rows=None):
         (0.5, "1×2", "#f59e0b", "dot"),
         (0.25,"1×4", "#ef4444", "dot"),
     ]
+    # BULLISH fan — ascending from anchor_low (x=0)
     for ratio, lbl, col, dash in angle_specs:
         fig.add_trace(go.Scatter(
             x=angle_x, y=[al + d*scale*ratio for d in angle_x],
-            mode="lines", name=lbl,
-            line=dict(color=col, width=2.5 if lbl=="1×1" else 1.2, dash=dash),
+            mode="lines", name=f"Bull {lbl}",
+            line=dict(color=col, width=2.5 if lbl=="1×1" else 1.0, dash=dash),
             opacity=0.85,
+        ))
+
+    # BEARISH fan — descending from anchor_high
+    ah = gd["anchor_high"]
+    anchor_high_date = gd.get("anchor_high_date")
+    if anchor_high_date is not None:
+        high_x_offset = (pd.Timestamp(anchor_high_date) - anchor_dt).days
+        bear_angle_x  = list(range(high_x_offset, proj_days, 1))
+        bear_specs = [
+            (2.0, "Bear 2×1", "#ef4444", "dash"),
+            (1.0, "Bear 1×1", "#f97316", "solid"),
+            (0.5, "Bear 1×2", "#ef4444", "dot"),
+        ]
+        for ratio, lbl, col, dash in bear_specs:
+            fig.add_trace(go.Scatter(
+                x=bear_angle_x,
+                y=[ah - (d - high_x_offset)*scale*ratio for d in bear_angle_x],
+                mode="lines", name=lbl,
+                line=dict(color=col, width=2.0 if "1×1" in lbl else 0.9, dash=dash),
+                opacity=0.7,
+            ))
+        # Anchor HIGH marker
+        fig.add_trace(go.Scatter(
+            x=[high_x_offset], y=[ah], mode="markers+text",
+            marker=dict(color="#ef4444", size=14, symbol="triangle-down"),
+            text=[f"  Anchor High\n  {ah:,.0f}"], textposition="middle right",
+            textfont=dict(color="#ef4444", size=10), name="Anchor High", showlegend=False,
         ))
 
     # Sq9 horizontal levels
@@ -1712,23 +1964,32 @@ def _build_index_gann_chart(hist, gd, price, index_label, forecast_rows=None):
 
     # Forecast markers on chart
     if forecast_rows:
-        today = gd["today"]
+        today      = gd["today"]
         today_days = (today - gd["anchor_low_date"]).days
         for row in forecast_rows:
-            if row["conf_score"] >= 2:  # Only MODERATE+ on chart
-                fd_days = today_days + row["days_away"]
-                marker_col = "#f59e0b" if row["conf_score"] == 2 else "#ff4444"
-                fig.add_trace(go.Scatter(
-                    x=[fd_days], y=[row["best_angle_price"]],
-                    mode="markers+text",
-                    marker=dict(color=marker_col, size=10, symbol="diamond",
-                                line=dict(color="#ffffff", width=1)),
-                    text=[f"  {row['date'].strftime('%d %b')}\n  {row['best_angle_price']:,.0f}"],
-                    textposition="middle right",
-                    textfont=dict(color=marker_col, size=9),
-                    name=f"Forecast {row['date'].strftime('%d %b')}",
-                    showlegend=False,
-                ))
+            max_cs = max(row["bull_cs"], row["bear_cs"])
+            if max_cs >= 2:
+                fd_days     = today_days + row["days_away"]
+                is_bull     = row["bull_cs"] >= row["bear_cs"]
+                watch_price = row["bull_watch_price"] if is_bull else row["bear_watch_price"]
+                marker_col  = "#10b981" if is_bull else "#ef4444"
+                symbol      = "triangle-up" if is_bull else "triangle-down"
+                if row["intersection"]:
+                    watch_price = row["intersection_price"] or watch_price
+                    marker_col  = "#f59e0b"
+                    symbol      = "diamond"
+                if watch_price and watch_price > 0:
+                    fig.add_trace(go.Scatter(
+                        x=[fd_days], y=[watch_price],
+                        mode="markers+text",
+                        marker=dict(color=marker_col, size=11, symbol=symbol,
+                                    line=dict(color="#ffffff", width=1)),
+                        text=[f"  {row['date'].strftime('%d %b')}\n  {watch_price:,.0f}"],
+                        textposition="middle right",
+                        textfont=dict(color=marker_col, size=9),
+                        name=f"{'⚡' if row['intersection'] else ('📈' if is_bull else '📉')} {row['date'].strftime('%d %b')}",
+                        showlegend=False,
+                    ))
 
     fig.update_layout(
         height=580, paper_bgcolor="#060810", plot_bgcolor="#0d1117",
@@ -2659,7 +2920,8 @@ with tab_index:
             anchor_high     = ainfo["anchor_high"]
 
             # Recompute Gann instantly (fast — pure math, no network)
-            gd = _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high, hist_for_gann)
+            gd = _compute_gann_from_anchor(price, anchor_low, anchor_low_date, anchor_high,
+                                           hist_for_gann, anchor_high_date=ainfo.get("anchor_high_date"))
 
             # ── INNER TABS ─────────────────────────────────────────────
             itab_tech, itab_gann, itab_forecast, itab_backtest = st.tabs([
@@ -2886,82 +3148,130 @@ with tab_index:
                 st.markdown(
                     f'<div class="lc lc-gold" style="font-size:12px;margin-bottom:12px">'
                     f'🔮 Forward forecast · <b>{tf_label}</b> · Next <b>{days_forward} days</b> · '
-                    f'Anchor: <b>{selected_anchor_name}</b> ({anchor_low:,.2f} · {anchor_low_date.strftime("%d %b %Y")})</div>',
+                    f'Anchor Low: <b>{anchor_low:,.2f}</b> ({anchor_low_date.strftime("%d %b %Y")}) · '
+                    f'Anchor High: <b>{anchor_high:,.2f}</b></div>',
                     unsafe_allow_html=True,
                 )
 
                 st.markdown("""
-                <div class="gc gc-cyan" style="font-size:12px;margin-bottom:12px;line-height:1.7">
-                <b style="color:#06b6d4">How to read this table:</b><br>
-                Each row = a date where Gann time cycles converge (natural square, division, or anniversary from anchor).<br>
-                <b>Best Angle</b> = the Gann angle whose projected price most closely matches a Square of Nine level on that date.<br>
-                <b>Sq9 Level</b> = the nearest Sq9 cardinal/diagonal spoke to that angle projection.<br>
-                <b>Deviation</b> = gap between angle price and Sq9 level. <b>Under 0.5% = very tight</b>.<br>
-                <b>🔥 HIGH</b> = angle + Sq9 tight AND 2+ time events on same date. <b>These are the dates to watch.</b><br>
-                <b style="color:#ef4444">⚠️ These are probability zones, not certainties. Always confirm with price action before trading.</b>
+                <div class="gc gc-cyan" style="font-size:12px;margin-bottom:12px;line-height:1.8">
+                <b style="color:#06b6d4">How to read this table (Gann's actual method):</b><br>
+                📈 <b>Bull rows</b> — ascending angles from anchor LOW. Watch price = Sq9 resistance above CMP.<br>
+                📉 <b>Bear rows</b> — descending angles from anchor HIGH. Watch price = Sq9 support below CMP.<br>
+                ⚡ <b>Intersection rows</b> — bull and bear 1×1 angles meet near this date. Highest probability turn.<br>
+                🌿 <b>Seasonal dates</b> — equinox/solstice (Mar 20, Jun 21, Sep 22, Dec 21) added as cycle markers.<br>
+                <b style="color:#f59e0b">🔥 HIGH</b> = angle within 0.5% of Sq9 level AND 2+ time events. <b>These are Gann's actual forecast dates.</b><br>
+                <b style="color:#ef4444">⚠️ Always wait for candlestick confirmation at the watch price before trading.</b>
                 </div>
                 """, unsafe_allow_html=True)
 
-                with st.spinner("Building forecast table..."):
+                with st.spinner("Building forecast table (bull + bear)..."):
                     forecast_rows = _build_forecast_table(price, gd, timeframe_opt, days_forward)
 
                 if not forecast_rows:
-                    st.info(f"No Gann time events found in the next {days_forward} days for this anchor. Try the other anchor or a longer timeframe.")
+                    st.info(f"No qualifying Gann time events found in the next {days_forward} days. Try a different anchor or longer timeframe.")
                 else:
-                    # Highlight HIGH confidence rows
-                    high_rows = [r for r in forecast_rows if r["conf_score"] >= 3]
-                    mod_rows  = [r for r in forecast_rows if r["conf_score"] == 2]
+                    # ── GANN VERDICT PANEL ────────────────────────────────────
+                    # "On date X, price should be at Y — expect a reaction"
+                    with st.spinner("Building Gann Verdict..."):
+                        verdicts = _build_gann_verdict(price, gd, forecast_rows)
 
-                    if high_rows:
-                        st.markdown(f'<div style="color:#f59e0b;font-size:13px;font-weight:700;margin-bottom:8px">🔥 {len(high_rows)} HIGH-confidence date(s) in next {days_forward} days:</div>', unsafe_allow_html=True)
-                        for row in high_rows:
+                    st.markdown('<div style="font-size:14px;font-weight:900;color:#f59e0b;margin:4px 0 10px;letter-spacing:-0.5px">🎯 GANN VERDICT — Key Dates & Price Levels</div>', unsafe_allow_html=True)
+                    if not verdicts:
+                        st.markdown(
+                            '<div class="lc lc-blue" style="font-size:12px">No HIGH/MODERATE confluence dates found in this window. All signals are LOW — wait for a stronger setup or extend the timeframe.</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        for i, v in enumerate(verdicts):
+                            rank = ["🥇","🥈","🥉"][i] if i < 3 else "•"
+                            diff_sign = "+" if v["diff_pct"] >= 0 else ""
                             st.markdown(
-                                f'<div class="gc gc-red" style="margin-bottom:8px;padding:16px">'
+                                f'<div style="background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(0,0,0,0));'
+                                f'border:2px solid {v["col"]}66;border-radius:16px;padding:18px 20px;margin-bottom:10px">'
+                                f'<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px">'
+                                f'<div>'
+                                f'  <div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">{rank} Gann Date</div>'
+                                f'  <div style="font-size:1.4rem;font-weight:900;color:#e8edf5">{v["date"].strftime("%d %b %Y")}</div>'
+                                f'  <div style="font-size:12px;color:#475569;margin-top:3px">{v["days_away"]} days away · {v["events"][:80]}{"…" if len(v["events"])>80 else ""}</div>'
+                                f'</div>'
+                                f'<div style="text-align:center">'
+                                f'  <div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px">Watch Price</div>'
+                                f'  <div style="font-size:1.8rem;font-weight:900;font-family:JetBrains Mono,monospace;color:{v["col"]}">{v["watch_price"]:,.2f}</div>'
+                                f'  <div style="font-size:11px;color:#475569">{diff_sign}{v["diff_pct"]:.2f}% from CMP {price:,.2f}</div>'
+                                f'</div>'
+                                f'<div style="text-align:right">'
+                                f'  <div style="font-size:11px;color:{v["col"]};font-weight:700">{v["dir_lbl"]}</div>'
+                                f'  <div style="font-size:10px;color:#475569;margin-top:4px">Bull score: {v["bull_cs"]}/3 · Bear score: {v["bear_cs"]}/3</div>'
+                                f'</div>'
+                                f'</div>'
+                                f'<div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;color:#64748b">'
+                                f'  📌 Gann says: <b style="color:{v["col"]}">On {v["date"].strftime("%d %b %Y")}, '
+                                f'watch for a reaction near {v["watch_price"]:,.2f}</b> — '
+                                f'if price reaches this level AND forms a reversal candle, that is the trade signal.'
+                                f'</div>'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                    st.markdown('<div style="font-size:12px;font-weight:700;color:#475569;margin:16px 0 6px">📋 Full Forecast Table (Bull + Bear + Seasonal)</div>', unsafe_allow_html=True)
+
+                    # ── HIGH signals first ────────────────────────────────────
+                    high_rows = [r for r in forecast_rows if r["bull_cs"] >= 3 or r["bear_cs"] >= 3]
+                    if high_rows:
+                        st.markdown(f'<div style="color:#f59e0b;font-size:12px;font-weight:700;margin-bottom:6px">🔥 {len(high_rows)} HIGH-confidence date(s):</div>', unsafe_allow_html=True)
+                        for row in high_rows:
+                            dir_col = "#10b981" if row["bull_cs"] >= row["bear_cs"] else "#ef4444"
+                            dir_arrow = "📈" if row["bull_cs"] >= row["bear_cs"] else "📉"
+                            watch = row["bull_watch_price"] if row["bull_cs"] >= row["bear_cs"] else row["bear_watch_price"]
+                            st.markdown(
+                                f'<div class="gc" style="margin-bottom:6px;padding:14px;border-color:{dir_col}44">'
                                 f'<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">'
-                                f'<div><div style="font-size:1.1rem;font-weight:900;color:#f59e0b">{row["date"].strftime("%d %b %Y")}</div>'
-                                f'<div style="font-size:11px;color:#475569;margin-top:2px">{row["days_away"]}d away · {row["events"]}</div></div>'
-                                f'<div style="text-align:center"><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px">Watch Price</div>'
-                                f'<div style="font-size:1.5rem;font-weight:900;font-family:JetBrains Mono,monospace;color:#10b981">{row["closest_sq9"]:,.2f}</div>'
-                                f'<div style="font-size:10px;color:#475569">Sq9 · {row["best_angle"]} angle → {row["best_angle_price"]:,.2f}</div></div>'
-                                f'<div style="text-align:center"><div style="font-size:10px;color:#64748b">Angle-Sq9 Dev</div>'
-                                f'<div style="font-size:1rem;font-weight:700;color:{"#10b981" if row["sq9_dev"]<=0.3 else "#f59e0b"}">{row["sq9_dev"]:.3f}%</div></div>'
-                                f'<div><span style="background:#10b98122;border:1px solid #10b981;border-radius:20px;padding:4px 12px;font-size:12px;font-weight:700;color:#10b981">🔥 HIGH</span></div>'
+                                f'<div><b style="color:#e8edf5">{row["date"].strftime("%d %b %Y")}</b>'
+                                f'<span style="color:#475569;font-size:11px;margin-left:8px">{row["days_away"]}d away</span></div>'
+                                f'<div style="font-size:1.2rem;font-weight:900;font-family:JetBrains Mono,monospace;color:{dir_col}">'
+                                f'{dir_arrow} {watch:,.2f}</div>'
+                                f'<div style="font-size:11px;color:#475569">{row["events"][:60]}{"…" if len(row["events"])>60 else ""}</div>'
+                                f'<span style="background:{dir_col}22;border:1px solid {dir_col};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;color:{dir_col}">🔥 HIGH</span>'
                                 f'</div></div>',
                                 unsafe_allow_html=True,
                             )
 
-                    if mod_rows:
-                        st.markdown(f'<div style="color:#94a3b8;font-size:12px;font-weight:700;margin:12px 0 6px">⚡ {len(mod_rows)} MODERATE signals:</div>', unsafe_allow_html=True)
-
-                    # Full table
-                    st.markdown('<div style="font-size:12px;font-weight:700;color:#475569;margin:12px 0 4px">All Gann time events in window:</div>', unsafe_allow_html=True)
+                    # ── Full table ────────────────────────────────────────────
                     table_data = []
                     for row in forecast_rows:
+                        direction = row["primary_dir"]
+                        if row["intersection"]:
+                            watch_str = f"~{row['intersection_price']:,.2f} (intersection)"
+                        elif row["bull_cs"] >= row["bear_cs"]:
+                            watch_str = f"{row['bull_watch_price']:,.2f} (Bull {row['bull_best_angle']})"
+                        else:
+                            watch_str = f"{row['bear_watch_price']:,.2f} (Bear {row['bear_best_angle']})" if row["bear_watch_price"] else "—"
                         table_data.append({
-                            "Date":           row["date"].strftime("%d %b %Y"),
-                            "Days Away":      row["days_away"],
-                            "Events":         row["events"],
-                            "1×1 Projection": f"{row['proj_1x1']:,.2f}",
-                            "2×1 Projection": f"{row['proj_2x1']:,.2f}",
-                            "Best Angle":     row["best_angle"],
-                            "Angle Price":    f"{row['best_angle_price']:,.2f}",
-                            "Nearest Sq9":    f"{row['closest_sq9']:,.2f}",
-                            "Dev %":          f"{row['sq9_dev']:.3f}%",
-                            "Confidence":     row["confidence"],
+                            "Date":        row["date"].strftime("%d %b %Y"),
+                            "Days Away":   row["days_away"],
+                            "Direction":   direction,
+                            "Watch Price": watch_str,
+                            "Bull 1×1":    f"{row['bull_proj_1x1']:,.2f}",
+                            "Bear 1×1":    f"{row['bear_proj_1x1']:,.2f}" if row["bear_proj_1x1"] else "—",
+                            "Bull Conf":   row["bull_conf"],
+                            "Bear Conf":   row["bear_conf"],
+                            "Events":      row["events"][:70],
                         })
                     st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
 
-                    # Chart with forecast markers
-                    st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 4px">📊 Chart with Forecast Markers (MODERATE+ only)</div>', unsafe_allow_html=True)
+                    # Chart
+                    st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 4px">📊 Chart with Bull + Bear Angle Fans + Forecast Markers</div>', unsafe_allow_html=True)
                     fchart = _build_index_gann_chart(hist_for_gann, gd, price, ilabel, forecast_rows=forecast_rows)
                     if fchart:
                         st.plotly_chart(fchart, use_container_width=True)
 
                     st.markdown(
-                        '<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:12px;padding:12px 16px;font-size:12px;color:#ef4444;margin-top:8px">'
-                        '⚠️ <b>Disclaimer:</b> These are mathematical projections based on Gann theory. They represent <b>zones of probable reaction</b>, not price guarantees. '
-                        'A price "touching" a level does not mean the trade is confirmed — always wait for candlestick/price action confirmation. '
-                        'Never size a position based on Gann alone. Use strict stop losses.'
+                        '<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);'
+                        'border-radius:12px;padding:12px 16px;font-size:12px;color:#ef4444;margin-top:8px">'
+                        '⚠️ <b>Disclaimer:</b> These are mathematical projections. They represent <b>zones of probable reaction</b>, not guaranteed price targets. '
+                        'Gann himself waited for price action confirmation (reversal candle) at these levels before entering. '
+                        'Never risk capital without a stop loss.'
                         '</div>',
                         unsafe_allow_html=True,
                     )
