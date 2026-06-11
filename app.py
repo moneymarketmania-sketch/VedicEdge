@@ -2630,7 +2630,7 @@ with tab_analyzer:
                 today=gd["today"],
             )
             if gann_fig:
-                st.plotly_chart(gann_fig, use_container_width=True)
+                st.plotly_chart(gann_fig, use_container_width=True, key="gann_chart_overview")
             else:
                 st.info("Chart unavailable — insufficient history data.")
 
@@ -3060,7 +3060,7 @@ with tab_index:
                 st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 4px">📊 Scaled Gann Chart</div>', unsafe_allow_html=True)
                 gann_fig = _build_index_gann_chart(hist_for_gann, gd, price, ilabel)
                 if gann_fig:
-                    st.plotly_chart(gann_fig, use_container_width=True)
+                    st.plotly_chart(gann_fig, use_container_width=True, key="gann_chart_now")
 
                 # Final verdict
                 gv_rr  = round((gd["gann_t1"] - price) / max(price - gd["gann_sl"], 0.01), 2)
@@ -3213,7 +3213,7 @@ with tab_index:
                     st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin:16px 0 4px">📊 Gann Chart with Angle Fans + Forecast Markers</div>', unsafe_allow_html=True)
                     fchart = _build_index_gann_chart(hist_for_gann, gd, price, ilabel, forecast_rows=forecast_rows)
                     if fchart:
-                        st.plotly_chart(fchart, use_container_width=True)
+                        st.plotly_chart(fchart, use_container_width=True, key="gann_chart_forecast")
 
                     st.markdown(
                         '<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);'
