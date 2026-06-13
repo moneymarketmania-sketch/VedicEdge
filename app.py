@@ -1715,6 +1715,237 @@ def _build_gann_verdict(price, gd, forecast_rows, zone, sq9_r1, sq9_r2, sq9_s1, 
 
 
 # ── Backtest: how accurate have past confluence dates been? ───────────────────
+
+
+# ── Candlestick Pattern Detection ─────────────────────────────────────────────
+def detect_reversal_candle(o, h, l, c, prev_close, direction="any"):
+    """
+    Detect reversal candlestick patterns on a single candle.
+    Returns (pattern_name, strength, bias) or None.
+    strength: 1=weak, 2=moderate, 3=strong
+    bias: 'bull', 'bear', 'any'
+    direction: filter to only return 'bull', 'bear', or 'any'
+    """
+    body       = abs(c - o)
+    full_rng   = max(h - l, 0.001)
+    upper_wick = h - max(o, c)
+    lower_wick = min(o, c) - l
+    body_pct   = body / full_rng
+    is_bull    = c >= o
+    is_bear    = c < o
+    patterns   = []
+
+    # ── Doji (body < 10% of range) ───────────────────────────────────────────
+    if body_pct < 0.10:
+        if lower_wick > 3 * max(upper_wick, 0.001):
+            patterns.append(("Dragonfly Doji", 2, "bull"))
+        elif upper_wick > 3 * max(lower_wick, 0.001):
+            patterns.append(("Gravestone Doji", 2, "bear"))
+        else:
+            patterns.append(("Doji", 1, "any"))
+        d_match = [p for p in patterns if direction=="any" or p[2]==direction or p[2]=="any"]
+        return max(d_match, key=lambda x: x[1]) if d_match else None
+
+    # ── Wick-dominant patterns (body 10-45%) ─────────────────────────────────
+    if 0.10 <= body_pct <= 0.45:
+        if lower_wick >= 2.0 * body and upper_wick <= body:
+            patterns.append(("Hammer", 2, "bull"))
+        if upper_wick >= 2.0 * body and lower_wick <= body:
+            patterns.append(("Shooting Star", 2, "bear"))
+
+    # ── Marubozu (body >= 60%, wicks < 20% of range) ─────────────────────────
+    if is_bull and body_pct >= 0.60 and (h - c) < 0.20 * full_rng:
+        patterns.append(("Bull Marubozu", 3, "bull"))
+    if is_bear and body_pct >= 0.60 and (c - l) < 0.20 * full_rng:
+        patterns.append(("Bear Marubozu", 3, "bear"))
+
+    # ── Engulfing (body >= 40%, closes past prev_close) ──────────────────────
+    if is_bull and body_pct >= 0.40 and c > prev_close and o < prev_close:
+        # Only add if Marubozu didn't already fire (Marubozu is stronger)
+        if not any(p[0] == "Bull Marubozu" for p in patterns):
+            patterns.append(("Bull Engulf", 2, "bull"))
+    if is_bear and body_pct >= 0.40 and c < prev_close and o > prev_close:
+        if not any(p[0] == "Bear Marubozu" for p in patterns):
+            patterns.append(("Bear Engulf", 2, "bear"))
+
+    d_match = [p for p in patterns if direction=="any" or p[2]==direction or p[2]=="any"]
+    return max(d_match, key=lambda x: x[1]) if d_match else None
+
+
+# ── Proper Backtest: measure actual reversal after signal ─────────────────────
+def _backtest_proper(hist, gd, lookback_days=730):
+    """
+    Correct backtest methodology:
+    1. Find all past HIGH-confidence Gann time dates (2+ events converging)
+    2. On/around each date, check if price was near a fixed Sq9 level
+    3. Check if a SIGNIFICANT REVERSAL (>1.5% move in direction change) happened
+       within 3 trading days AFTER the signal date
+    4. Separately check if a reversal candlestick formed on/around signal date
+    Returns detailed results with real edge measurement.
+    """
+    if hist is None or len(hist) < 100:
+        return None
+
+    today          = gd["today"]
+    anchor_low_d   = gd["anchor_low_date"]
+    anchor_high_d  = gd.get("anchor_high_date")
+    scale          = gd["scale"]
+    lookback_start = today - timedelta(days=lookback_days)
+
+    GANN_UNITS  = [45, 90, 135, 144, 180, 225, 270, 315, 360, 450, 504, 720]
+    NATURAL_SQS = [n*n for n in range(1, 60)]
+
+    # Collect past event dates with 2+ converging signals (HIGH confidence only)
+    event_dates = {}
+    for unit in GANN_UNITS:
+        mult = 1
+        while True:
+            d  = unit * mult
+            fd = anchor_low_d + timedelta(days=d)
+            if fd >= today: break
+            if fd >= lookback_start:
+                event_dates.setdefault(fd, []).append(f"Gann {d}d/Low")
+            mult += 1
+
+    for sq in NATURAL_SQS:
+        fd = anchor_low_d + timedelta(days=sq)
+        if lookback_start <= fd < today:
+            n = int(math.sqrt(sq))
+            event_dates.setdefault(fd, []).append(f"Sq{n}²/Low")
+
+    if anchor_high_d:
+        for unit in GANN_UNITS:
+            mult = 1
+            while True:
+                d  = unit * mult
+                fd = anchor_high_d + timedelta(days=d)
+                if fd >= today: break
+                if fd >= lookback_start:
+                    event_dates.setdefault(fd, []).append(f"Gann {d}d/High")
+                mult += 1
+        for sq in NATURAL_SQS:
+            fd = anchor_high_d + timedelta(days=sq)
+            if lookback_start <= fd < today:
+                n = int(math.sqrt(sq))
+                event_dates.setdefault(fd, []).append(f"Sq{n}²/High")
+
+    # Filter to HIGH confidence (2+ events)
+    high_conf = {d: v for d, v in event_dates.items() if len(v) >= 2}
+
+    hist_c = hist.copy()
+    hist_c.index = pd.to_datetime(hist_c.index).normalize()
+    hist_list = list(hist_c.itertuples())  # for fast access
+
+    results = []
+    for event_date, events in sorted(high_conf.items()):
+        # Get price on signal date
+        sig_data = hist_c[hist_c.index.date == event_date]
+        if sig_data.empty:
+            # Try ±2 days (weekends/holidays)
+            for offset in [1, -1, 2, -2]:
+                adj = event_date + timedelta(days=offset)
+                sig_data = hist_c[hist_c.index.date == adj]
+                if not sig_data.empty:
+                    break
+        if sig_data.empty:
+            continue
+
+        sig_close = float(sig_data["Close"].iloc[0])
+        sig_high  = float(sig_data["High"].iloc[0])
+        sig_low   = float(sig_data["Low"].iloc[0])
+        sig_open  = float(sig_data["Open"].iloc[0]) if "Open" in sig_data else sig_close
+
+        # Sq9 levels around signal price
+        sq9_lvls = _sq9_fixed_levels(sig_close, n_rings=4)
+        sq9_above = [x for x in sq9_lvls if x > sig_close]
+        sq9_below = [x for x in sq9_lvls if x <= sig_close]
+        sq9_r1    = sq9_above[0] if sq9_above else sig_close * 1.01
+        sq9_s1    = sq9_below[-1] if sq9_below else sig_close * 0.99
+        nearest_sq9 = min(sq9_lvls, key=lambda x: abs(x - sig_close))
+        sq9_dev_pct = abs(nearest_sq9 - sig_close) / sig_close * 100
+
+        # Was price near a Sq9 level on signal date? (within 1%)
+        at_sq9 = sq9_dev_pct <= 1.0
+
+        # Candlestick pattern on signal day
+        prev_data = hist_c[hist_c.index.date < event_date].tail(1)
+        prev_close_val = float(prev_data["Close"].iloc[0]) if not prev_data.empty else sig_close
+        candle_pattern = detect_reversal_candle(
+            sig_open, sig_high, sig_low, sig_close, prev_close_val, "any"
+        )
+
+        # What happened in next 3 trading days
+        next_data = hist_c[hist_c.index.date > event_date].head(3)
+        if len(next_data) < 2:
+            continue
+
+        next_closes = next_data["Close"].tolist()
+        next_highs  = next_data["High"].tolist()
+        next_lows   = next_data["Low"].tolist()
+        max_move_up   = (max(next_highs)   - sig_close) / sig_close * 100
+        max_move_down = (sig_close - min(next_lows))    / sig_close * 100
+        end_close     = next_closes[-1]
+        net_move_pct  = (end_close - sig_close) / sig_close * 100
+
+        # Reversal definition: 3-day max move >= 1.5% in either direction
+        significant_move = max(max_move_up, max_move_down) >= 1.5
+        direction_up     = net_move_pct > 0
+        reversal_pct     = max_move_up if direction_up else max_move_down
+
+        # Classify
+        turned   = significant_move
+        at_sq9_and_candle = at_sq9 and candle_pattern is not None
+
+        results.append(dict(
+            date          = event_date,
+            events        = events,
+            n_events      = len(events),
+            sig_close     = round(sig_close, 2),
+            nearest_sq9   = round(nearest_sq9, 2),
+            sq9_dev_pct   = round(sq9_dev_pct, 2),
+            at_sq9        = at_sq9,
+            candle        = candle_pattern,
+            candle_str    = f"{candle_pattern[0]} (str:{candle_pattern[1]})" if candle_pattern else "None",
+            turned        = turned,
+            direction_up  = direction_up,
+            reversal_pct  = round(reversal_pct, 2),
+            net_move_pct  = round(net_move_pct, 2),
+            at_sq9_and_candle = at_sq9_and_candle,
+        ))
+
+    if not results:
+        return None
+
+    total          = len(results)
+    hits           = [r for r in results if r["turned"]]
+    # Filtered: only count when ALSO at Sq9 level
+    sq9_filtered   = [r for r in results if r["at_sq9"]]
+    sq9_hits       = [r for r in sq9_filtered if r["turned"]]
+    # Double filtered: Sq9 + candle confirmation
+    confirmed      = [r for r in results if r["at_sq9_and_candle"]]
+    confirmed_hits = [r for r in confirmed if r["turned"]]
+
+    # Avg reversal size on hits
+    avg_rev = round(sum(r["reversal_pct"] for r in hits) / max(len(hits), 1), 2)
+
+    return dict(
+        results        = results,
+        total          = total,
+        hits           = hits,
+        misses         = [r for r in results if not r["turned"]],
+        hit_rate       = round(len(hits) / total * 100, 1) if total else 0,
+        # Filtered stats
+        sq9_total      = len(sq9_filtered),
+        sq9_hits       = sq9_hits,
+        sq9_hit_rate   = round(len(sq9_hits) / max(len(sq9_filtered), 1) * 100, 1),
+        # Double confirmed
+        conf_total     = len(confirmed),
+        conf_hits      = confirmed_hits,
+        conf_hit_rate  = round(len(confirmed_hits) / max(len(confirmed), 1) * 100, 1),
+        avg_reversal   = avg_rev,
+    )
+
+
 def _backtest_confluence(hist, gd):
     """
     Scan past 24 months. For every past Gann time event, check if price
@@ -3127,6 +3358,39 @@ with tab_index:
                         for i, v in enumerate(verdicts):
                             rank = ["🥇","🥈","🥉"][i] if i < 3 else "•"
                             diff_sign = "+" if v["diff_pct"] >= 0 else ""
+
+                            # ── Live candle confirmation check ────────────────
+                            # If signal date is today or within past 3 days, check actual candle
+                            candle_check_html = ""
+                            days_since = -v["days_away"]  # positive = date has passed
+                            if 0 <= days_since <= 3 and hist_for_gann is not None:
+                                hist_c2 = hist_for_gann.copy()
+                                hist_c2.index = pd.to_datetime(hist_c2.index).normalize()
+                                sig_row = hist_c2[hist_c2.index.date == v["date"]]
+                                if sig_row.empty and days_since == 0:
+                                    candle_check_html = '<div style="font-size:11px;color:#475569;margin-top:6px">🕐 Today — candle not yet complete</div>'
+                                elif not sig_row.empty:
+                                    prev_row = hist_c2[hist_c2.index.date < v["date"]].tail(1)
+                                    prev_c = float(prev_row["Close"].iloc[0]) if not prev_row.empty else float(sig_row["Close"].iloc[0])
+                                    so = float(sig_row["Open"].iloc[0]) if "Open" in sig_row else prev_c
+                                    sh = float(sig_row["High"].iloc[0])
+                                    sl = float(sig_row["Low"].iloc[0])
+                                    sc = float(sig_row["Close"].iloc[0])
+                                    cp = detect_reversal_candle(so, sh, sl, sc, prev_c, "any")
+                                    if cp:
+                                        cp_col = "#10b981" if cp[2]=="bull" else "#ef4444" if cp[2]=="bear" else "#f59e0b"
+                                        stars  = "★"*cp[1] + "☆"*(3-cp[1])
+                                        candle_check_html = (
+                                            f'<div style="margin-top:8px;padding:8px 12px;background:rgba(255,255,255,0.04);'
+                                            f'border-radius:8px;border-left:3px solid {cp_col}">'
+                                            f'<span style="color:{cp_col};font-weight:700">🕯️ {cp[0]}</span> '
+                                            f'<span style="color:#475569;font-size:11px">{stars} · strength {cp[1]}/3</span> — '
+                                            f'<b style="color:{cp_col}">{"Confirmed — this is the trade signal." if cp[1]>=2 else "Weak pattern — wait for stronger candle."}</b>'
+                                            f'</div>'
+                                        )
+                                    else:
+                                        candle_check_html = '<div style="font-size:11px;color:#475569;margin-top:6px">🕯️ No reversal candle yet on this date — wait</div>'
+
                             st.markdown(
                                 f'<div style="background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(0,0,0,0));'
                                 f'border:2px solid {v["col"]}66;border-radius:16px;padding:18px 20px;margin-bottom:10px">'
@@ -3143,13 +3407,14 @@ with tab_index:
                                 f'</div>'
                                 f'<div style="text-align:right">'
                                 f'  <div style="font-size:11px;color:{v["col"]};font-weight:700">{v["dir_lbl"]}</div>'
-                                f'  <div style="font-size:10px;color:#475569;margin-top:4px">Time confidence: {v["time_cs"]}/3 · Zone: {v["zone"]}</div>'
+                                f'  <div style="font-size:10px;color:#475569;margin-top:4px">Time conf: {v["time_cs"]}/3 · Zone: {v["zone"]}</div>'
                                 f'</div>'
                                 f'</div>'
                                 f'<div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;color:#64748b">'
                                 f'  📌 Gann says: <b style="color:{v["col"]}">On {v["date"].strftime("%d %b %Y")}, '
                                 f'watch for a reaction near {v["watch_price"]:,.2f}</b> — '
-                                f'if price reaches this level AND forms a reversal candle, that is the trade signal.'
+                                f'price reaching this Sq9 level + a reversal candle = the trade signal.'
+                                f'{candle_check_html}'
                                 f'</div>'
                                 f'</div>',
                                 unsafe_allow_html=True,
@@ -3231,67 +3496,93 @@ with tab_index:
             # ═══════════════════════════════════════════════════════
             with itab_backtest:
                 st.markdown(
-                    f'<div class="lc lc-blue" style="font-size:12px;margin-bottom:12px">'
-                    f'📋 Backtest: past 24 months · Anchor: <b>{selected_anchor_name}</b> · '
-                    f'Checking if past Gann confluence dates produced actual turns</div>',
+                    f'<div class="lc lc-blue" style="font-size:12px;margin-bottom:12px">' +
+                    f'📋 Proper Backtest · Anchor: <b>{selected_anchor_name}</b> · ' +
+                    f'Measures real edge: did a significant move happen after each HIGH-confidence signal?</div>',
                     unsafe_allow_html=True,
                 )
                 st.markdown("""
-                <div class="gc gc-blue" style="font-size:12px;margin-bottom:12px;line-height:1.7">
-                <b style="color:#3b82f6">How this works:</b> We scan every past Gann time event (last 2 years) where a Sq9 level
-                was within 1.5% of the 1×1 angle projection. Then we check actual historical price data to see if price
-                touched that level AND changed direction within ±7 days. This gives you the real hit rate for this anchor.
-                <br><b style="color:#f59e0b">If hit rate is below 50%, reconsider this anchor.</b>
+                <div class="gc gc-blue" style="font-size:12px;margin-bottom:14px;line-height:1.8">
+                <b style="color:#3b82f6">3-layer edge measurement:</b><br>
+                <b>Layer 1 — Raw hit rate:</b> Did price move ≥1.5% in any direction within 3 days of signal?<br>
+                <b>Layer 2 — Sq9 filtered:</b> Same, but only when price was also near a Sq9 level (±1%)<br>
+                <b>Layer 3 — Confirmed:</b> Sq9 + a reversal candlestick pattern on signal day<br>
+                <b style="color:#f59e0b">Layer 3 is the most reliable — this is what you should trade.</b>
+                If Layer 3 hit rate is below 50%, this anchor has no edge. Try another.
                 </div>
                 """, unsafe_allow_html=True)
 
-                with st.spinner("Running backtest on 2 years of data..."):
-                    bt = _backtest_confluence(hist_for_gann, gd)
+                with st.spinner("Running proper backtest (2 years)..."):
+                    bt = _backtest_proper(hist_for_gann, gd, lookback_days=730)
 
                 if bt is None or bt["total"] == 0:
-                    st.info("Not enough historical data or no qualifying signals in the past 2 years for this anchor.")
+                    st.info("Not enough HIGH-confidence signals found in the past 2 years for this anchor. Try a different anchor or extend the lookback.")
                 else:
-                    hit_col   = "#10b981" if bt["hit_rate"] >= 60 else "#f59e0b" if bt["hit_rate"] >= 45 else "#ef4444"
-                    hit_label = "Good" if bt["hit_rate"] >= 60 else "Moderate" if bt["hit_rate"] >= 45 else "Poor — reconsider anchor"
-                    bc1, bc2, bc3 = st.columns(3)
-                    with bc1:
-                        st.markdown(kpi("Signals Found", bt["total"], "#38bdf8", "qualifying Gann events"), unsafe_allow_html=True)
-                    with bc2:
-                        st.markdown(kpi("Hits", len(bt["hits"]), "#10b981", "price touched & reversed"), unsafe_allow_html=True)
-                    with bc3:
-                        st.markdown(kpi("Hit Rate", f"{bt['hit_rate']}%", hit_col, hit_label), unsafe_allow_html=True)
+                    # ── Edge summary ──────────────────────────────────────────
+                    l1c = "#10b981" if bt["hit_rate"]     >= 55 else "#f59e0b" if bt["hit_rate"]     >= 40 else "#ef4444"
+                    l2c = "#10b981" if bt["sq9_hit_rate"] >= 55 else "#f59e0b" if bt["sq9_hit_rate"] >= 40 else "#ef4444"
+                    l3c = "#10b981" if bt["conf_hit_rate"]>= 55 else "#f59e0b" if bt["conf_hit_rate"]>= 40 else "#ef4444"
 
-                    st.markdown(f'{pb(bt["hit_rate"], 100, hit_col)}', unsafe_allow_html=True)
+                    st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:10px">📊 Edge Measurement — 3 Layers</div>', unsafe_allow_html=True)
+                    c1,c2,c3,c4 = st.columns(4)
+                    with c1:
+                        st.markdown(kpi("Total Signals", bt["total"], "#38bdf8", "HIGH conf (2+ events)"), unsafe_allow_html=True)
+                    with c2:
+                        st.markdown(kpi("Layer 1 Hit Rate", f"{bt['hit_rate']}%", l1c, f"{len(bt['hits'])}/{bt['total']} · any move ≥1.5%"), unsafe_allow_html=True)
+                    with c3:
+                        st.markdown(kpi("Layer 2 (Sq9 Filter)", f"{bt['sq9_hit_rate']}%", l2c, f"{len(bt['sq9_hits'])}/{bt['sq9_total']} · at Sq9 level"), unsafe_allow_html=True)
+                    with c4:
+                        st.markdown(kpi("Layer 3 (Confirmed)", f"{bt['conf_hit_rate']}%", l3c, f"{len(bt['conf_hits'])}/{bt['conf_total']} · Sq9+candle"), unsafe_allow_html=True)
+
+                    st.markdown(f'{pb(bt["conf_hit_rate"], 100, l3c)}', unsafe_allow_html=True)
+
+                    # Verdict on anchor quality
+                    if bt["conf_hit_rate"] >= 60:
+                        anchor_verdict = "✅ STRONG EDGE — This anchor produces reliable signals when Sq9 + candle confirm."
+                        av_cls = "lc-green"
+                    elif bt["conf_hit_rate"] >= 45:
+                        anchor_verdict = "⚡ MODERATE EDGE — Use only Layer 3 signals with strict stop loss."
+                        av_cls = "lc-gold"
+                    elif bt["conf_hit_rate"] >= 30:
+                        anchor_verdict = "⚠️ WEAK EDGE — Consider trying a different anchor. Signals alone are not reliable."
+                        av_cls = "lc-red"
+                    else:
+                        anchor_verdict = "❌ NO EDGE — This anchor is not producing reliable signals. Change anchor immediately."
+                        av_cls = "lc-red"
+
                     st.markdown(
-                        f'<div class="lc {"lc-green" if bt["hit_rate"]>=60 else "lc-gold" if bt["hit_rate"]>=45 else "lc-red"}" style="font-size:12px;margin:4px 0 16px">'
-                        f'{"✅ This anchor has shown reliable signals in the past 2 years." if bt["hit_rate"]>=60 else "⚡ Moderate reliability. Use with extra confirmation." if bt["hit_rate"]>=45 else "⚠️ Low hit rate. This anchor may not be the right one for this index. Try another anchor."}'
-                        f'</div>',
+                        f'<div class="lc {av_cls}" style="font-size:13px;font-weight:700;margin:8px 0 16px">' +
+                        f'{anchor_verdict} · Avg reversal on hits: <b>{bt["avg_reversal"]}%</b></div>',
                         unsafe_allow_html=True,
                     )
 
-                    if bt["hits"]:
-                        st.markdown(f'<div style="font-size:12px;font-weight:700;color:#10b981;margin-bottom:6px">✅ Confirmed Turns ({len(bt["hits"])}):</div>', unsafe_allow_html=True)
-                        for h_rec in bt["hits"][:8]:
-                            st.markdown(
-                                f'<div class="lc lc-green" style="font-size:12px;margin-bottom:4px">'
-                                f'<b>{h_rec["date"].strftime("%d %b %Y")}</b> · '
-                                f'{", ".join(h_rec["events"])} · '
-                                f'Predicted: <b>{h_rec["closest_sq9"]:,.2f}</b> · '
-                                f'Actual range: {h_rec["actual_low"]:,.2f}–{h_rec["actual_high"]:,.2f} · '
-                                f'Sq9 dev: {h_rec["sq9_dev"]}%</div>',
-                                unsafe_allow_html=True,
-                            )
-                    if bt["misses"]:
-                        st.markdown(f'<div style="font-size:12px;font-weight:700;color:#ef4444;margin:10px 0 6px">❌ Misses ({len(bt["misses"])}):</div>', unsafe_allow_html=True)
-                        for m_rec in bt["misses"][:5]:
-                            st.markdown(
-                                f'<div class="lc lc-red" style="font-size:12px;margin-bottom:4px">'
-                                f'<b>{m_rec["date"].strftime("%d %b %Y")}</b> · '
-                                f'{", ".join(m_rec["events"])} · '
-                                f'Predicted: <b>{m_rec["closest_sq9"]:,.2f}</b> · '
-                                f'Actual: {m_rec["actual_low"]:,.2f}–{m_rec["actual_high"]:,.2f}</div>',
-                                unsafe_allow_html=True,
-                            )
+                    # ── Signal breakdown table ────────────────────────────────
+                    st.markdown('<div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:6px">📋 All past HIGH-confidence signals:</div>', unsafe_allow_html=True)
+                    table_rows = []
+                    for r in sorted(bt["results"], key=lambda x: x["date"], reverse=True):
+                        candle_str = r["candle_str"] if r["candle_str"] != "None" else "—"
+                        l3_hit = r["turned"] and r["at_sq9"] and r["candle"] is not None
+                        table_rows.append({
+                            "Date":        r["date"].strftime("%d %b %Y"),
+                            "Events":      " + ".join(r["events"])[:60],
+                            "Price":       f"{r['sig_close']:,.2f}",
+                            "Sq9 Level":   f"{r['nearest_sq9']:,.2f} ({r['sq9_dev_pct']}%)",
+                            "At Sq9":      "✅" if r["at_sq9"] else "—",
+                            "Candle":      candle_str,
+                            "3d Move":     f"{r['net_move_pct']:+.1f}% (max {r['reversal_pct']:.1f}%)",
+                            "Turned":      "✅" if r["turned"] else "❌",
+                            "L3 Signal":   "🔥" if l3_hit else "—",
+                        })
+                    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+                    st.markdown(
+                        '<div style="background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.2);' +
+                        'border-radius:12px;padding:10px 14px;font-size:11px;color:#ef4444;margin-top:8px">' +
+                        '⚠️ This backtest measures PAST performance. Gann analysis is probabilistic, not deterministic. ' +
+                        'Layer 3 (Sq9 + candle) is the minimum required for any trade consideration.' +
+                        '</div>',
+                        unsafe_allow_html=True,
+                    )
 
     else:
         # Landing / empty state
