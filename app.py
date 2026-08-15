@@ -1287,4 +1287,167 @@ def main():
                 st.dataframe(pd.DataFrame(ang_rows,columns=["Angle","Level","Description","From CMP"]),use_container_width=True,hide_index=True)
                 st.markdown(f'<div class="lc lc-{"green" if "Bull" in gd["angle_label"] else "gold" if "Caution" in gd["angle_label"] else "red"}"><b style="color:{gd["angle_color"]}">{gd["angle_label"]}</b> · Closest: {gd["closest_angle"]} · 1×1 dev: {gd["price_vs_1x1"]:+.2f}%</div>',unsafe_allow_html=True)
                 sqc=st.columns(4)
-                for col,(lab,val,vc) in zip(sqc,[("S2 (SL)",gd["sq9_s2"][1],"#ef4444"),("S1",gd["sq9_s1"][1],"#f97316"),("R1 (T1)",gd["sq9_r1
+                                for col,(lab,val,vc) in zip(sqc,[("S2 (SL)",gd["sq9_s2"][1],"#ef4444"),("S1 (Support)",gd["sq9_s1"][1],"#f97316"),("R1 (T1)",gd["sq9_r1"][1],"#10b981"),("R2 (T2)",gd["sq9_r2"][1],"#3b82f6")]):
+                    with col:
+                        dp=round((val-price)/max(price,0.01)*100,1)
+                        st.markdown(f'<div class="gc" style="text-align:center;border-color:{vc}44"><div class="kpi-label">{lab}</div><div class="kpi-val" style="color:{vc}">{val:,.2f}</div><div style="font-size:11px;color:#475569;margin-top:3px">{dp:+.1f}%</div></div>',unsafe_allow_html=True)
+                st.markdown(f'<div class="lc lc-cyan" style="font-size:12px">Sq9 Root: <b>{gd["sq9_root"]:.4f}</b> · Nearest: <b>{gd["nearest_sq9"]:,.2f}</b> · Dev: <b style="color:{"#10b981" if gd["price_sq9_dev"]<=0.5 else "#f59e0b" if gd["price_sq9_dev"]<=1.5 else "#94a3b8"}">{gd["price_sq9_dev"]:.3f}%</b></div>',unsafe_allow_html=True)
+                # Time cycles
+                st.markdown('<div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:8px">⏱️ Time Cycle Status</div>',unsafe_allow_html=True)
+                cd=gd["cycle_details"]
+                tcc1,tcc2=st.columns(2)
+                with tcc1:
+                    tool_html="".join([f'<div class="lc {"lc-green" if a else "lc-red"}" style="font-size:12px;margin-bottom:4px">{"✅" if a else "⚪"} <b>{t}</b><br><span style="color:#475569">{d}</span></div>' for t,a,d in [("Natural Squares",cd["tool1_active"],f"Next: {cd['next_sq_date'].strftime('%d %b %Y')} ({cd['days_to_sq']}d)"),("Gann Divisions",cd["tool2_active"],f"Nearest {cd['nearest_div']}d → {cd['next_div_date'].strftime('%d %b %Y')}"),("Anniversary",cd["tool3_active"],f"Next: {cd['next_anniv_date'].strftime('%d %b %Y')}")]])
+                    st.markdown(f'<div class="gc gc-cyan"><div style="font-weight:700;color:#06b6d4;font-size:13px;margin-bottom:8px">3-Tool Time · Active: {gd["active_tools"]}/3</div>{tool_html}</div>',unsafe_allow_html=True)
+                with tcc2:
+                    st.markdown('<div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:6px">Upcoming Gann Dates:</div>',unsafe_allow_html=True)
+                    for t,fd,da in gd["gann_future"][:5]:
+                        cls="lc-green" if da<=10 else "lc-gold" if da<=30 else "lc-blue"
+                        tag=' <b style="color:#10b981">◀ NEAR!</b>' if da<=10 else ""
+                        st.markdown(f'<div class="lc {cls}" style="font-size:12px;margin-bottom:4px"><b style="color:#f59e0b">{t}d</b> → {fd.strftime("%d %b %Y")} <span style="color:#475569">({da}d)</span>{tag}</div>',unsafe_allow_html=True)
+                # Squaring
+                sq_col="#10b981" if gd["is_squared"] else "#f59e0b"
+                st.markdown(f'<div class="gc {"gc-green" if gd["is_squared"] else "gc-gold"}" style="margin-top:16px"><div style="color:#f59e0b;font-weight:700;margin-bottom:6px">⚖️ Price = Time Squaring</div><div style="font-size:13px;color:#94a3b8;line-height:2">Price {price:,.2f} · Days {gd["days_from_low"]} · Scale {gd["scale"]:.4f}<br>Scaled time = <b style="color:#f59e0b">{gd["scaled_time"]:,.2f}</b><br>Deviation: <b style="color:{sq_col}">{gd["squaring_pct"]}%</b> {"✅ SQUARED" if gd["is_squared"] else "⚠️ Not squared"}</div></div>',unsafe_allow_html=True)
+                # Confluence
+                conf_c="#10b981" if gd["confluence"]>=4 else "#f59e0b" if gd["confluence"]>=3 else "#ef4444"
+                tier_lbl="🔥 HIGH (trade with confirmation)" if gd["confluence"]>=4 else "⚡ MODERATE (watch)" if gd["confluence"]>=3 else "⏳ LOW (wait)"
+                ccol1,ccol2=st.columns([1,2])
+                with ccol1:
+                    st.markdown(f'<div class="gc" style="text-align:center"><div class="kpi-label">Confluence</div><div style="font-size:56px;font-weight:900;font-family:JetBrains Mono,monospace;color:{conf_c}">{gd["confluence"]}/5</div>{pb(gd["confluence"],5,conf_c)}<div style="color:{conf_c};font-weight:700;font-size:12px">{tier_lbl}</div></div>',unsafe_allow_html=True)
+                with ccol2:
+                    r_html="".join([f'<div class="lc lc-{"green" if any(x in r for x in ["🔥","✅"]) else "gold" if "⚡" in r else "blue"}" style="font-size:12px;margin-bottom:4px">{r}</div>' for r in gd["reasons"]])
+                    st.markdown(f'<div class="gc gc-gold">{r_html}</div>',unsafe_allow_html=True)
+                # Chart
+                gann_fig=_build_index_gann_chart(hist_for_gann,gd,price,ilabel)
+                if gann_fig: st.plotly_chart(gann_fig,use_container_width=True,key="gann_chart_now")
+                # Verdict
+                gv_rr=round((gd["gann_t1"]-price)/max(price-gd["gann_sl"],0.01),2)
+                gv_cls="vb-buy" if gd["confluence"]>=4 else "vb-caution" if gd["confluence"]>=3 else "vb-avoid"
+                gv_txt="STRONG SETUP" if gd["confluence"]>=4 else "WATCH" if gd["confluence"]>=3 else "WAIT"
+                st.markdown(f'<div class="gc gc-gold"><div class="verdict-banner {gv_cls}" style="margin-bottom:12px">🔶 {gv_txt} · {ilabel}</div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:10px"><div class="lc lc-blue" style="font-size:12px">⚓ Anchor<br>{ainfo["anchor_low"]:,.2f}</div><div class="lc lc-gold" style="font-size:12px">📐 Zone<br>{gd["angle_label"]}</div><div class="lc lc-{"green" if gd["is_squared"] else "gold"}" style="font-size:12px">⚖️ P=T<br>{"✅ Squared" if gd["is_squared"] else f"⚠️ {gd['squaring_pct']}%"}</div><div class="lc lc-green" style="font-size:12px">🎯 T1<br>{gd["gann_t1"]:,.2f}</div><div class="lc lc-blue" style="font-size:12px">🎯 T2<br>{gd["gann_t2"]:,.2f}</div><div class="lc lc-red" style="font-size:12px">🛑 SL<br>{gd["gann_sl"]:,.2f}</div></div><div style="font-size:12px;color:#64748b">R:R 1:{gv_rr} {"✅" if gv_rr>=2.0 else "⚠️"} · Scale {gd["scale"]:.4f}</div></div>',unsafe_allow_html=True)
+
+            # ═══════════════════════════════════════════════════════
+            # FORECAST TAB
+            # ═══════════════════════════════════════════════════════
+            with itab_forecast:
+                tf_label="Intraday" if "Intraday" in timeframe_opt else "Swing"
+                st.markdown(f'<div class="lc lc-gold" style="font-size:12px;margin-bottom:12px">🔮 <b>{tf_label}</b> · Next <b>{days_forward} days</b> · Anchor: <b>{ainfo["anchor_low"]:,.2f}</b> ({ainfo["anchor_low_date"].strftime("%d %b %Y")})</div>',unsafe_allow_html=True)
+                st.markdown('<div class="gc gc-cyan" style="font-size:12px;margin-bottom:12px;line-height:1.8"><b style="color:#06b6d4">How to read:</b><br>📈 <b>Bull rows</b> — ascending angles from anchor LOW. Watch price = Sq9 resistance above CMP.<br>📉 <b>Bear rows</b> — descending angles from anchor HIGH. Watch price = Sq9 support below CMP.<br>⚡ <b>Intersections</b> — bull and bear 1×1 meet near this date. Highest probability turn.<br><b style="color:#f59e0b">🔥 HIGH</b> = 2+ time events converging. <b style="color:#ef4444">⚠️ Always wait for candlestick confirmation.</b></div>',unsafe_allow_html=True)
+                with st.spinner("Building forecast…"):
+                    forecast_rows,zone,sq9_r1,sq9_r2,sq9_s1,sq9_s2=_build_forecast_table(price,gd,timeframe_opt,days_forward)
+                if not forecast_rows:
+                    st.info(f"No qualifying Gann time events in next {days_forward} days. Try a different anchor or longer timeframe.")
+                else:
+                    with st.spinner("Building verdict…"):
+                        verdicts=_build_gann_verdict(price,gd,forecast_rows,zone,sq9_r1,sq9_r2,sq9_s1,sq9_s2)
+                    st.markdown('<div style="font-size:14px;font-weight:900;color:#f59e0b;margin:4px 0 10px">🎯 GANN VERDICT</div>',unsafe_allow_html=True)
+                    if not verdicts:
+                        st.markdown('<div class="lc lc-blue" style="font-size:12px">No HIGH/MODERATE confluence dates. All LOW — wait.</div>',unsafe_allow_html=True)
+                    else:
+                        for i,v in enumerate(verdicts):
+                            rank=["🥇","🥈","🥉"][i] if i<3 else "•"
+                            ds_sign="+" if v["diff_pct"]>=0 else ""
+                            # Candle confirmation check
+                            candle_html=""
+                            days_since=-v["days_away"]
+                            if 0<=days_since<=3 and hist_for_gann is not None:
+                                hc=hist_for_gann.copy(); hc.index=pd.to_datetime(hc.index).normalize()
+                                sr=hc[hc.index.date==v["date"]]
+                                if sr.empty and days_since==0:
+                                    candle_html='<div style="font-size:11px;color:#475569;margin-top:6px">🕐 Today — candle not yet complete</div>'
+                                elif not sr.empty:
+                                    pr=hc[hc.index.date<v["date"]].tail(1)
+                                    pc=float(pr["Close"].iloc[0]) if not pr.empty else float(sr["Close"].iloc[0])
+                                    so=float(sr["Open"].iloc[0]); sh=float(sr["High"].iloc[0]); sl=float(sr["Low"].iloc[0]); sc=float(sr["Close"].iloc[0])
+                                    cp=detect_reversal_candle(so,sh,sl,sc,pc,"any")
+                                    if cp:
+                                        cpc="#10b981" if cp[2]=="bull" else "#ef4444" if cp[2]=="bear" else "#f59e0b"
+                                        stars="★"*cp[1]+"☆"*(3-cp[1])
+                                        candle_html=f'<div style="margin-top:8px;padding:8px 12px;background:rgba(255,255,255,0.04);border-radius:8px;border-left:3px solid {cpc}"><span style="color:{cpc};font-weight:700">🕯️ {cp[0]}</span> <span style="color:#475569;font-size:11px">{stars} · {cp[1]}/3</span> — <b style="color:{cpc}">{"Confirmed!" if cp[1]>=2 else "Weak — wait"}</b></div>'
+                                    else:
+                                        candle_html='<div style="font-size:11px;color:#475569;margin-top:6px">🕯️ No reversal candle yet — wait</div>'
+                            st.markdown(f'<div style="background:linear-gradient(135deg,rgba(255,255,255,0.04),rgba(0,0,0,0));border:2px solid {v["col"]}66;border-radius:16px;padding:18px 20px;margin-bottom:10px"><div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px"><div><div style="font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px">{rank} Gann Date</div><div style="font-size:1.4rem;font-weight:900;color:#e8edf5">{v["date"].strftime("%d %b %Y")}</div><div style="font-size:12px;color:#475569;margin-top:3px">{v["days_away"]}d away · {v["events"][:80]}{"…" if len(v["events"])>80 else ""}</div></div><div style="text-align:center"><div style="font-size:10px;color:#64748b;text-transform:uppercase;letter-spacing:1px">Watch Price</div><div style="font-size:1.8rem;font-weight:900;font-family:JetBrains Mono,monospace;color:{v["col"]}">{v["watch_price"]:,.2f}</div><div style="font-size:11px;color:#475569">{ds_sign}{v["diff_pct"]:.2f}% from CMP</div></div><div style="text-align:right"><div style="font-size:11px;color:{v["col"]};font-weight:700">{v["dir_lbl"]}</div><div style="font-size:10px;color:#475569;margin-top:4px">Conf: {v["time_cs"]}/3 · Zone: {v["zone"]}</div></div></div><div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.05);font-size:12px;color:#64748b">📌 On <b>{v["date"].strftime("%d %b %Y")}</b>, watch for reaction near <b style="color:{v["col"]}">{v["watch_price"]:,.2f}</b>{candle_html}</div></div>',unsafe_allow_html=True)
+                    # Zone banner
+                    zone_col="#10b981" if zone=="STRONG_BULL" else "#ef4444" if zone=="BEAR" else "#f59e0b"
+                    zone_lbl={"STRONG_BULL":"📈 STRONG BULL — Above Bull 1×1","BEAR":"📉 BEAR — Below Bear 1×1","CAUTION":"⚡ CAUTION — Between Bull & Bear 1×1"}[zone]
+                    st.markdown(f'<div class="lc" style="border-color:{zone_col}66;font-size:12px"><b style="color:{zone_col}">{zone_lbl}</b> · R1: {sq9_r1:,.2f} · R2: {sq9_r2:,.2f} · S1: {sq9_s1:,.2f} · S2: {sq9_s2:,.2f}</div>',unsafe_allow_html=True)
+                    # Full table
+                    st.markdown('<div style="font-size:12px;font-weight:700;color:#475569;margin:12px 0 6px">📋 Full Forecast Table</div>',unsafe_allow_html=True)
+                    high_rows=[r for r in forecast_rows if r["time_cs"]>=3]
+                    if high_rows:
+                        st.markdown(f'<div style="color:#f59e0b;font-size:12px;font-weight:700;margin-bottom:6px">🔥 {len(high_rows)} HIGH-confidence date(s):</div>',unsafe_allow_html=True)
+                        for row in high_rows:
+                            dc="#10b981" if zone!="BEAR" else "#ef4444"
+                            wp=row["sq9_r1"] if zone!="BEAR" else row["sq9_s1"]
+                            st.markdown(f'<div class="gc" style="margin-bottom:6px;padding:14px;border-color:{dc}44"><div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px"><div><b style="color:#e8edf5">{row["date"].strftime("%d %b %Y")}</b><span style="color:#475569;font-size:11px;margin-left:8px">{row["days_away"]}d</span></div><div style="font-size:1.2rem;font-weight:900;font-family:JetBrains Mono,monospace;color:{dc}">{wp:,.2f}</div><span style="background:{dc}22;border:1px solid {dc};border-radius:20px;padding:3px 10px;font-size:11px;font-weight:700;color:{dc}">🔥 HIGH · {row["n_events"]} events</span></div></div>',unsafe_allow_html=True)
+                    td=[]
+                    for row in forecast_rows:
+                        wp=row["sq9_r1"] if zone!="BEAR" else row["sq9_s1"]
+                        td.append({"Date":row["date"].strftime("%d %b %Y"),"Days":row["days_away"],"Dir":row["primary_dir"],"Watch":f"{wp:,.2f}","R1":f"{row['sq9_r1']:,.2f}","S1":f"{row['sq9_s1']:,.2f}","Bull1×1":f"{row['bull_1x1_on_date']:,.2f}","Bear1×1":f"{row['bear_1x1_on_date']:,.2f}" if row["bear_1x1_on_date"] else "—","Conf":row["time_conf"],"Events":row["events"][:80]})
+                    st.dataframe(pd.DataFrame(td),use_container_width=True,hide_index=True)
+                    fchart=_build_index_gann_chart(hist_for_gann,gd,price,ilabel,forecast_rows=forecast_rows)
+                    if fchart: st.plotly_chart(fchart,use_container_width=True,key="gann_chart_forecast")
+                    st.markdown('<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:12px;padding:12px 16px;font-size:12px;color:#ef4444;margin-top:8px">⚠️ <b>Disclaimer:</b> Watch prices are Sq9 levels. Dates are time cycle convergence points. Always wait for candle confirmation.</div>',unsafe_allow_html=True)
+
+            # ═══════════════════════════════════════════════════════
+            # BACKTEST TAB
+            # ═══════════════════════════════════════════════════════
+            with itab_backtest:
+                st.markdown(f'<div class="lc lc-blue" style="font-size:12px;margin-bottom:12px">📋 Backtest · Anchor: <b>{selected_anchor_name}</b></div>',unsafe_allow_html=True)
+                st.markdown('<div class="gc gc-blue" style="font-size:12px;margin-bottom:14px;line-height:1.8"><b style="color:#3b82f6">3-layer edge measurement:</b><br><b>Layer 1:</b> Did price move ≥1.5% within 3 days?<br><b>Layer 2:</b> Same + price near Sq9 (±1%)<br><b>Layer 3:</b> Sq9 + reversal candle confirmed<br><b style="color:#f59e0b">Layer 3 is most reliable — trade only these.</b></div>',unsafe_allow_html=True)
+                with st.spinner("Running backtest (2 years)…"):
+                    bt=_backtest_proper(hist_for_gann,gd,lookback_days=730)
+                if bt is None or bt["total"]==0:
+                    st.info("Not enough HIGH-confidence signals in 2 years. Try another anchor.")
+                else:
+                    l1c="#10b981" if bt["hit_rate"]>=55 else "#f59e0b" if bt["hit_rate"]>=40 else "#ef4444"
+                    l2c="#10b981" if bt["sq9_hit_rate"]>=55 else "#f59e0b" if bt["sq9_hit_rate"]>=40 else "#ef4444"
+                    l3c="#10b981" if bt["conf_hit_rate"]>=55 else "#f59e0b" if bt["conf_hit_rate"]>=40 else "#ef4444"
+                    bc=st.columns(4)
+                    with bc[0]: st.markdown(kpi("Signals",bt["total"],"#38bdf8","HIGH conf"),unsafe_allow_html=True)
+                    with bc[1]: st.markdown(kpi("L1 Hit",f"{bt['hit_rate']}%",l1c,f"{len(bt['hits'])}/{bt['total']}"),unsafe_allow_html=True)
+                    with bc[2]: st.markdown(kpi("L2 Sq9",f"{bt['sq9_hit_rate']}%",l2c,f"{len(bt['sq9_hits'])}/{bt['sq9_total']}"),unsafe_allow_html=True)
+                    with bc[3]: st.markdown(kpi("L3 Confirmed",f"{bt['conf_hit_rate']}%",l3c,f"{len(bt['conf_hits'])}/{bt['conf_total']}"),unsafe_allow_html=True)
+                    st.markdown(f'{pb(bt["conf_hit_rate"],100,l3c)}',unsafe_allow_html=True)
+                    if bt["conf_hit_rate"]>=60: av="✅ STRONG EDGE"; avc="lc-green"
+                    elif bt["conf_hit_rate"]>=45: av="⚡ MODERATE EDGE"; avc="lc-gold"
+                    elif bt["conf_hit_rate"]>=30: av="⚠️ WEAK EDGE"; avc="lc-red"
+                    else: av="❌ NO EDGE"; avc="lc-red"
+                    st.markdown(f'<div class="lc {avc}" style="font-size:13px;font-weight:700;margin:8px 0 16px">{av} · Avg reversal: <b>{bt["avg_reversal"]}%</b></div>',unsafe_allow_html=True)
+                    st.markdown('<div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:6px">📋 Past signals:</div>',unsafe_allow_html=True)
+                    tr=[]
+                    for r in sorted(bt["results"],key=lambda x:x["date"],reverse=True):
+                        cs=r["candle_str"] if r["candle_str"]!="None" else "—"
+                        l3h=r["turned"] and r["at_sq9"] and r["candle"] is not None
+                        tr.append({"Date":r["date"].strftime("%d %b %Y"),"Events":" + ".join(r["events"])[:60],"Price":f"{r['sig_close']:,.2f}","Sq9":f"{r['nearest_sq9']:,.2f} ({r['sq9_dev_pct']}%)","At Sq9":"✅" if r["at_sq9"] else "—","Candle":cs,"3d Move":f"{r['net_move_pct']:+.1f}% (max {r['reversal_pct']:.1f}%)","Turned":"✅" if r["turned"] else "❌","L3":"🔥" if l3h else "—"})
+                    st.dataframe(pd.DataFrame(tr),use_container_width=True,hide_index=True)
+                    st.markdown('<div style="background:rgba(239,68,68,0.06);border:1px solid rgba(239,68,68,0.2);border-radius:12px;padding:10px 14px;font-size:11px;color:#ef4444;margin-top:8px">⚠️ Past performance only. L3 (Sq9+candle) is minimum for trade consideration.</div>',unsafe_allow_html=True)
+        else:
+            # Landing state for Index tab
+            st.markdown('<div style="padding:24px 0"><div style="text-align:center;color:#475569;margin-bottom:24px;font-size:14px">Select an index and timeframe, then click <b style="color:#f59e0b">Analyze</b></div><div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">',unsafe_allow_html=True)
+            for name,cfg in list(INDEX_MAP.items())[:12]:
+                st.markdown(f'<div class="gc" style="border-color:{cfg["color"]}33;text-align:center;padding:18px"><div style="font-size:1.1rem;font-weight:800;color:{cfg["color"]}">{cfg["label"]}</div><div style="font-size:11px;color:#475569;margin-top:4px">Gann · Angles · Sq9 · Forecast</div></div>',unsafe_allow_html=True)
+            st.markdown('</div></div>',unsafe_allow_html=True)
+
+    # ── TAB 3: GANN STOCK SCANNER ──────────────────────────────────────────
+    with tab_scanner:
+        st.markdown('<div class="gc gc-gold" style="padding:20px"><div style="font-size:1.2rem;font-weight:800;color:#f59e0b;margin-bottom:8px">🔍 Gann Stock Scanner</div><div style="font-size:13px;color:#64748b">Scan NSE universe and rank every stock by Gann confluence × technical score.</div></div>',unsafe_allow_html=True)
+        scan_cols=st.columns([2,1,1,1])
+        with scan_cols[0]: scan_universe=st.selectbox("Universe",["Nifty 50 (50)","Nifty 100 (100)","Nifty 200 (200)","Full Nifty 500"],index=1,key="sc_uni")
+        with scan_cols[1]:
+            slm={"Nifty 50 (50)":50,"Nifty 100 (100)":100,"Nifty 200 (200)":200,"Full Nifty 500":500}; scan_count=slm.get(scan_universe,100)
+            st.markdown(f'<div class="kpi"><div class="kpi-label">Symbols</div><div class="kpi-val" style="color:#06b6d4">{scan_count}</div></div>',unsafe_allow_html=True)
+        with scan_cols[2]: skip_demo=st.checkbox("Skip failures",value=True,key="sc_sd")
+        with scan_cols[3]: scan_btn=st.button("🚀 Run Scan",use_container_width=True,key="sc_run",type="primary")
+        if scan_btn:
+            st.session_state.scan_results=run_gann_scan(all_symbols[:scan_count])
+            st.session_state.scan_ran=True
+        if st.session_state.scan_results:
+            render_gann_index_analyzer_scanner(st.session_state.scan_results)
+        elif st.session_state.scan_ran:
+            st.markdown('<div class="gc gc-red" style="text-align:center;padding:24px"><div style="font-size:14px;color:#ef4444">Scan completed but no results.</div></div>',unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="gc gc-blue" style="text-align:center;padding:40px"><div style="font-size:1.2rem;font-weight:700;color:#3b82f6;margin-bottom:12px">Ready to scan</div><div style="font-size:13px;color:#64748b">Select universe and click <b>🚀 Run Scan</b>.<br>~1-3s per stock. 100 stocks ≈ 2-5 minutes.</div></div>',unsafe_allow_html=True)
+
+if __name__=="__main__":
+    main()
