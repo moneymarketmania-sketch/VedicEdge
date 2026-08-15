@@ -1287,8 +1287,8 @@ def main():
                 st.dataframe(pd.DataFrame(ang_rows,columns=["Angle","Level","Description","From CMP"]),use_container_width=True,hide_index=True)
                 st.markdown(f'<div class="lc lc-{"green" if "Bull" in gd["angle_label"] else "gold" if "Caution" in gd["angle_label"] else "red"}"><b style="color:{gd["angle_color"]}">{gd["angle_label"]}</b> · Closest: {gd["closest_angle"]} · 1×1 dev: {gd["price_vs_1x1"]:+.2f}%</div>',unsafe_allow_html=True)
                 sqc=st.columns(4)
-                                for col,(lab,val,vc) in zip(sqc,[("S2 (SL)",gd["sq9_s2"][1],"#ef4444"),("S1 (Support)",gd["sq9_s1"][1],"#f97316"),("R1 (T1)",gd["sq9_r1"][1],"#10b981"),("R2 (T2)",gd["sq9_r2"][1],"#3b82f6")]):
-                    with col:
+            for col,(lab,val,vc) in zip(sqc,[("S2 (SL)",gd["sq9_s2"][1],"#ef4444"),("S1 (Support)",gd["sq9_s1"][1],"#f97316"),("R1 (T1)",gd["sq9_r1"][1],"#10b981"),("R2 (T2)",gd["sq9_r2"][1],"#3b82f6")]):
+                with col:
                         dp=round((val-price)/max(price,0.01)*100,1)
                         st.markdown(f'<div class="gc" style="text-align:center;border-color:{vc}44"><div class="kpi-label">{lab}</div><div class="kpi-val" style="color:{vc}">{val:,.2f}</div><div style="font-size:11px;color:#475569;margin-top:3px">{dp:+.1f}%</div></div>',unsafe_allow_html=True)
                 st.markdown(f'<div class="lc lc-cyan" style="font-size:12px">Sq9 Root: <b>{gd["sq9_root"]:.4f}</b> · Nearest: <b>{gd["nearest_sq9"]:,.2f}</b> · Dev: <b style="color:{"#10b981" if gd["price_sq9_dev"]<=0.5 else "#f59e0b" if gd["price_sq9_dev"]<=1.5 else "#94a3b8"}">{gd["price_sq9_dev"]:.3f}%</b></div>',unsafe_allow_html=True)
