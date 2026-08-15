@@ -1242,7 +1242,7 @@ def main():
             with st.spinner(f"Fetching {cfg['label']}…"):
                 _idata=fetch_index_data(selected_index)
             if _idata is None:
-                st.error(f"❌ Could not fetch {cfg['label']}. Try again."); st.stop()
+                st.error(f"❌ Could not fetch {cfg['label']}. Try again.");     st.stop()
             with st.spinner("Fetching 10Y history…"):
                 _long_hist=fetch_index_long_history(selected_index)
             _hist=_long_hist if _long_hist is not None else _idata["hist"]
@@ -1319,7 +1319,7 @@ def main():
                     st.markdown(f'<div class="gc gc-gold">{r_html}</div>',unsafe_allow_html=True)
                 # Chart
                 gann_fig=_build_index_gann_chart(hist_for_gann,gd,price,ilabel)
-                if gann_fig: st.plotly_chart(gann_fig,use_container_width=True,key="gann_chart_now")
+                if gann_fig: st.plotly_chart(gann_fig,use_container_width=True,key=f"gann_chart_now_{selected_anchor_name}")
                 # Verdict
                 gv_rr=round((gd["gann_t1"]-price)/max(price-gd["gann_sl"],0.01),2)
                 gv_cls="vb-buy" if gd["confluence"]>=4 else "vb-caution" if gd["confluence"]>=3 else "vb-avoid"
@@ -1386,7 +1386,7 @@ def main():
                         td.append({"Date":row["date"].strftime("%d %b %Y"),"Days":row["days_away"],"Dir":row["primary_dir"],"Watch":f"{wp:,.2f}","R1":f"{row['sq9_r1']:,.2f}","S1":f"{row['sq9_s1']:,.2f}","Bull1×1":f"{row['bull_1x1_on_date']:,.2f}","Bear1×1":f"{row['bear_1x1_on_date']:,.2f}" if row["bear_1x1_on_date"] else "—","Conf":row["time_conf"],"Events":row["events"][:80]})
                     st.dataframe(pd.DataFrame(td),use_container_width=True,hide_index=True)
                     fchart=_build_index_gann_chart(hist_for_gann,gd,price,ilabel,forecast_rows=forecast_rows)
-                    if fchart: st.plotly_chart(fchart,use_container_width=True,key="gann_chart_forecast")
+                    if fchart: st.plotly_chart(fchart,use_container_width=True,key=f"gann_chart_forecast_{selected_anchor_name}")
                     st.markdown('<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:12px;padding:12px 16px;font-size:12px;color:#ef4444;margin-top:8px">⚠️ <b>Disclaimer:</b> Watch prices are Sq9 levels. Dates are time cycle convergence points. Always wait for candle confirmation.</div>',unsafe_allow_html=True)
 
             # ═══════════════════════════════════════════════════════
